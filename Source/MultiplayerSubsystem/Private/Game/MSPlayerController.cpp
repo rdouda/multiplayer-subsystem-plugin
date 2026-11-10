@@ -89,11 +89,33 @@ void AMSPlayerController::RefreshVoice()
 		return;
 	}
 
-	if (const UGameInstance* GameInstance = GetGameInstance())
+	UGameInstance* GameInstance = GetGameInstance();
+	if (!GameInstance)
 	{
-		if (UMSVoiceSubsystem* VoiceSubsystem = GameInstance->GetSubsystem<UMSVoiceSubsystem>())
-		{
-			VoiceSubsystem->RefreshVoiceState();
-		}
+		return;
 	}
+
+	UMSVoiceSubsystem* VoiceSubsystem = GameInstance->GetSubsystem<UMSVoiceSubsystem>();
+	if (!VoiceSubsystem)
+	{
+		return;
+	}
+
+	// Defer one tick so the engine's own voice teardown (which can fire on the
+	// same frame as the map load) has completed before we re-arm voice.
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		VoiceSubsystem->RefreshVoiceState();
+		return;
+	}
+
+	TWeakObjectPtr<UMSVoiceSubsystem> WeakVoice(VoiceSubsystem);
+	World->GetTimerManager().SetTimerForNextTick([WeakVoice]()
+		{
+			if (UMSVoiceSubsystem* Voice = WeakVoice.Get())
+			{
+				Voice->RefreshVoiceState();
+			}
+		});
 }

@@ -8,6 +8,7 @@
 #include "Game/MSGameMode.h"
 #include "Game/MSGameState.h"
 #include "Net/MSLANNetDriver.h"
+#include "Voice/MSVoiceSubsystem.h"
 #include "MultiplayerSubsystem.h"
 
 #include "Engine/Engine.h"
@@ -2164,7 +2165,26 @@ void UMSSessionSubsystem::NotifyMapStarted(EMSSessionPhase NewPhase, bool bAllow
 		PublishPresence();
 		UpdateFriendJoinState();
 	}
-
+	// --- ADDED: restart local voice after the map change. ---
+	// The engine tears down voice processing during the travel and can do so on the
+	// same frame InitGame runs. Defer one tick so our restart cannot be undone.
+	if (UGameInstance* GameInstance = GetGameInstance())
+	{
+		if (UMSVoiceSubsystem* VoiceSubsystem = GameInstance->GetSubsystem<UMSVoiceSubsystem>())
+		{
+			if (UWorld* World = GetGameWorld())
+			{
+				TWeakObjectPtr<UMSVoiceSubsystem> WeakVoice(VoiceSubsystem);
+				World->GetTimerManager().SetTimerForNextTick([WeakVoice]()
+					{
+						if (UMSVoiceSubsystem* Voice = WeakVoice.Get())
+						{
+							Voice->RefreshVoiceState();
+						}
+					});
+			}
+		}
+	}
 	OnLobbyInfoChanged.Broadcast();
 }
 

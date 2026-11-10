@@ -193,6 +193,14 @@ void UMSVoiceSubsystem::RefreshVoiceState()
 		return;
 	}
 
+	// If everything is already in the desired state, do nothing.
+	const bool bShouldTransmit =
+		CurrentInputMode == EMSVoiceInputMode::OpenMic || bPushToTalkHeld;
+	if (bLocalTalkerRegistered && bNetworkedVoiceActive == bShouldTransmit)
+	{
+		return;
+	}
+
 	UVOIPStatics::SetMicThreshold(MicThreshold);
 	ApplyInputMode();
 	UpdateLocalTalking();

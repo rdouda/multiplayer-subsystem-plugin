@@ -30,6 +30,16 @@ public:
 	UPROPERTY(EditAnywhere, Config, Category = "Backend")
 	EMSSessionBackend Backend = EMSSessionBackend::Auto;
 
+	/**
+	 * LAN lobbies run on the plugin's plain-IP net driver (MSLANNetDriver) instead of the project's GameNetDriver,
+	 * on both host and client, and the configured driver is restored when the lobby ends.
+	 * Keep this ON when the project's GameNetDriver is SteamSocketsNetDriver: the LAN backend (Null) has no Steam
+	 * connection, and a mismatch between the two sides fails with "PacketHandler parsing packet with zero's in last byte".
+	 * Turn it OFF only if your GameNetDriver already works for LAN, or you install your own LAN driver.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Backend")
+	bool bUsePlainIpDriverForLAN = true;
+
 	/** Map opened after leaving a lobby or after a disconnect. Required for Leave Lobby(true). */
 	UPROPERTY(EditAnywhere, Config, Category = "Maps", meta = (AllowedClasses = "/Script/Engine.World"))
 	TSoftObjectPtr<UWorld> MainMenuMap;

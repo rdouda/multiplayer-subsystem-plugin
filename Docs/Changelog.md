@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.1
+**LAN fixes** (host + client on one PC or across a LAN, Steam-enabled project).
+
+* **Join failed with `PacketHandler parsing packet with zero's in last byte` / `PendingConnectionFailure`.** The project's
+  `GameNetDriver` is normally `SteamSocketsNetDriver`, but LAN runs on the Null online subsystem, so host and client could end up
+  on different transports. LAN sessions now swap `GameNetDriver` to the plugin's `MSLANNetDriver` (a plain-IP `UIpNetDriver` that always
+  uses the platform socket subsystem) on host **and** client, and restore the configured driver afterwards.
+* **Join rejected with `incompatible_unique_net_id`.** On a Steam project the host's default online subsystem is Steam, but LAN
+  players log in with Null ids, and `AGameModeBase::PreLogin` refuses a mismatching id type. `AMSGameMode::PreLogin` now skips that
+  check for LAN lobbies (the real id still reaches `Login`).
+* **LAN lobbies showed `0/N` players** (and never filled up in the list). The advertised open-slot count of the Null session is now
+  kept in sync with the real player count (host included), and a leaving player no longer leaves the count one too high.
+* **Transport self-check.** Shortly after a LAN host/join the plugin logs the driver the engine really created
+  (`LAN transport check OK` / `FAILED`) and warns when the host's listen port differs from the advertised port.
+* **Duplicate / phantom LAN results.** Results are collapsed per session id *and* per connect address (lowest ping wins), and a hosting
+  process no longer lists its own lobby. Rows carry `ConnectAddress` (new `FMSLobbyInfo` field); `MS.Results` and the Find log print it, so a stale
+  beacon from an old process is easy to recognise.
+* New setting **Use Plain Ip Driver For LAN** (default on) to disable the override.
+* `MS.Diag` / `MS.Status` report the LAN transport override state.
+
 ## 1.2
 **Auto backend selection.** New `EMSSessionBackend` (`Auto` / `Steam` / `Null`) and a **Backend** setting in
 *Multiplayer Subsystem: Session*. LAN sessions always use the engine's **Null** online subsystem, so LAN works without Steam and
@@ -9,8 +29,8 @@ default online subsystem (normally Steam).
 * New Blueprint API: `Get Configured Backend`, `Get Active Backend`, `Get Active Backend Name`. `FMSLobbyInfo` gained a `Backend` field.
 * New `MS.Backend [auto|steam|null]` console command (shows configured/active/override or sets a runtime override).
 * Session delegates are now bound per online subsystem, because LAN (Null) and internet (Steam) can both be used in one process.
-* `MS.CheckConfig` is backend-aware: Steam checks only apply when internet play uses Steam; the Null subsystem is verified for LAN;
-  `SteamSockets` or `IpNetDriver` are accepted for LAN/Null.
+* `MS.CheckConfig` is backend-aware: Steam checks only apply when internet play uses Steam; the Null subsystem is verified for LAN.
+  LAN installs its own plain-IP driver for the session, so the configured `GameNetDriver` only matters for internet play.
 * Friends-list join, presence, visibility and the invite overlay report `NotSteam` / fail cleanly on LAN/Null lobbies.
 
 ## 1.1

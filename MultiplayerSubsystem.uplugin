@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 3,
-	"VersionName": "1.2",
+	"VersionName": "1.2.1",
 	"FriendlyName": "Multiplayer Subsystem",
 	"Description": "Listen-server sessions with automatic backend selection (Steam for internet, Null for LAN), friends-list join, passive ready-check, proximity voice and a full set of debug console commands.",
 	"Category": "Networking",

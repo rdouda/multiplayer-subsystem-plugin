@@ -29,6 +29,20 @@ internet sessions use:
 needs a separate Steam account per instance, while Null LAN works without Steam and lets two instances on one machine host
 and join each other. Friends-list join, presence and the invite overlay need Steam, so they are unavailable in LAN/Null lobbies.
 
+**LAN transport.** For the duration of a LAN session the plugin swaps the `GameNetDriver` definition to
+`/Script/MultiplayerSubsystem.MSLANNetDriver`, a plain-IP driver that always uses the platform (UDP) socket subsystem.
+This matters because SteamSockets makes itself the default socket subsystem when Steam is running; a Steam-enabled client
+would otherwise send SteamSockets packets at a host that has no Steam OSS and is listening on a plain UDP socket. The
+configured `GameNetDriver` (normally `SteamSocketsNetDriver`) is restored when the LAN session ends, and internet sessions
+never use the override. `MS.Diag` prints `LAN transport override: active/inactive` and the current definitions.
+Two seconds after the override is applied the plugin checks which driver the engine actually created and logs
+`LAN transport check OK` or, if it is not `MSLANNetDriver`, a loud `LAN transport check FAILED` line. The host also warns
+when it listens on a different port than the one advertised (two hosts on one PC). The override can be switched off with
+**Use Plain Ip Driver For LAN** (*Multiplayer Subsystem: Session -> Backend*); leave it on when `GameNetDriver` is `SteamSocketsNetDriver`.
+
+**LAN search results** are collapsed to one row per session id *and* per connect address, never include your own lobby, and
+show the address a joiner will connect to (`FMSLobbyInfo::ConnectAddress`, `addr=` in `MS.Results`).
+
 `MS.Backend [auto|steam|null]` overrides the configured backend for the next host/find/join without editing settings
 (LAN still resolves to Null). `MS.Backend` with no argument prints configured / active / override / OSS.
 
@@ -51,7 +65,7 @@ SteamAppId=480
 [Voice]
 bEnabled=true
 
-[/Script/Engine.GameEngine]
+[/Script/Engine.Engine]
 +NetDriverDefinitions=(DefName="GameNetDriver",DriverClassName="/Script/SteamSockets.SteamSocketsNetDriver",DriverClassNameFallback="/Script/OnlineSubsystemUtils.IpNetDriver")
 
 [/Script/SteamSockets.SteamSocketsNetDriver]

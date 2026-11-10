@@ -304,9 +304,10 @@ namespace MSDebug
 		for (int32 Index = 0; Index < Rows.Num(); ++Index)
 		{
 			const FMSLobbyInfo& Row = Rows[Index];
-			Out(Ar, ELogVerbosity::Display, FString::Printf(TEXT("  [%d] '%s' host='%s' %d/%d ping=%dms LAN=%d phase=%d  -> MS.Join %d"),
+			Out(Ar, ELogVerbosity::Display, FString::Printf(TEXT("  [%d] '%s' host='%s' %d/%d ping=%dms LAN=%d phase=%d addr=%s  -> MS.Join %d"),
 				Index, *Row.LobbyName, *Row.HostName, Row.CurrentPlayers, Row.MaxPlayers, Row.PingInMs,
-				Row.bIsLANMatch ? 1 : 0, static_cast<int32>(Row.Phase), Index));
+				Row.bIsLANMatch ? 1 : 0, static_cast<int32>(Row.Phase),
+				Row.ConnectAddress.IsEmpty() ? TEXT("-") : *Row.ConnectAddress, Index));
 		}
 	}
 

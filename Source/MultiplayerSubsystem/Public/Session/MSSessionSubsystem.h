@@ -185,7 +185,7 @@ public:
 	void NotifyTravelFinished(bool bSucceeded);
 
 	/** Called by AMSGameMode::PostLogin / Logout. */
-	void NotifyPlayerCountChanged();
+	void NotifyPlayerCountChanged(int32 OverrideCount = INDEX_NONE);
 
 	/** Called by AMSGameMode::SetNewPlayersAllowed. */
 	void NotifyNewPlayersAllowed(bool bAllowed);
@@ -263,6 +263,22 @@ private:
 	void CompleteJoin(bool bSuccess, EMSSessionError Error, const FString& CustomMessage = FString());
 	void ClearLocalSessionState();
 	void FailHost(EMSSessionError Error);
+
+	/**
+	 * LAN sessions must not inherit the SteamSockets GameNetDriver: a host without Steam listens
+	 * on a plain UDP socket. Swaps the GameNetDriver definition to the plugin's plain-IP LAN driver
+	 * (UMSLANNetDriver) and restores the configured driver when the LAN session ends.
+	 */
+	void SetLANNetDriverOverride(bool bEnable);
+
+	/**
+	 * After the LAN override is applied, the driver the engine really created is the only proof it worked.
+	 * Schedules a check that logs the driver class + local address, errors loudly when a LAN lobby is not on
+	 * MSLANNetDriver (the cause of "PacketHandler parsing packet with zero's in last byte"), and warns when the
+	 * host listens on a different port than the one advertised.
+	 */
+	void ScheduleTransportCheck();
+	bool RunTransportCheck(float DeltaTime);
 	void SetLastError(EMSSessionError Error);
 	void RecordNetworkError(EMSSessionError Error, const FText& Message);
 
@@ -357,6 +373,13 @@ private:
 	EMSSessionBackend BackendOverride = EMSSessionBackend::Auto;
 	IOnlineSubsystem* ActiveOSS = nullptr;
 	bool bHasActiveBackend = false;
+
+	// LAN net driver override (see SetLANNetDriverOverride)
+	bool bLANNetDriverOverrideActive = false;
+	FTSTicker::FDelegateHandle TransportCheckHandle;
+	int32 TransportCheckAttempts = 0;
+	FString SavedGameNetDriverClassName;
+	FString SavedGameNetDriverFallbackClassName;
 
 	// Delegate handles. The session delegates are bound lazily per online subsystem
 	// because LAN uses the Null backend while internet sessions use Steam.

@@ -84,8 +84,22 @@ void AMSGameMode::PreLogin(const FString& Options, const FString& Address, const
 {
 	MS_LOG(Display, TEXT("A client is connecting from %s (unique id: %s)..."), *Address, *UniqueId.ToString());
 
+	// AGameModeBase::PreLogin rejects a player whose unique id type differs from the DEFAULT online subsystem
+	// ("incompatible_unique_net_id"). LAN lobbies run on Null, but a Steam project's default subsystem is Steam,
+	// so every LAN joiner (id type NULL) would be refused. PreLogin only uses the id for that check; the real id
+	// still reaches Login from the connection. So for LAN lobbies, validate with an empty id.
+	FUniqueNetIdRepl IdForEngineCheck = UniqueId;
+	if (const UMSSessionSubsystem* LanSubsystem = GetSessionSubsystem())
+	{
+		if (LanSubsystem->IsInLobby() && LanSubsystem->IsLANLobby() && UniqueId.IsValid())
+		{
+			MS_LOG(Log, TEXT("LAN lobby: skipping the engine's default-online-subsystem id-type check for %s."), *UniqueId.ToString());
+			IdForEngineCheck = FUniqueNetIdRepl();
+		}
+	}
+
 	FString SuperError;
-	Super::PreLogin(Options, Address, UniqueId, SuperError);
+	Super::PreLogin(Options, Address, IdForEngineCheck, SuperError);
 	if (!SuperError.IsEmpty())
 	{
 		ErrorMessage = SuperError;
@@ -134,7 +148,7 @@ void AMSGameMode::Logout(AController* Exiting)
 
 	if (UMSSessionSubsystem* Subsystem = GetSessionSubsystem())
 	{
-		Subsystem->NotifyPlayerCountChanged();
+		Subsystem->NotifyPlayerCountChanged(GetNumPlayers());
 	}
 }
 

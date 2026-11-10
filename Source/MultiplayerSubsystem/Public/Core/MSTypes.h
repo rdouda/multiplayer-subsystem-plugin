@@ -191,6 +191,13 @@ struct FMSLobbyInfo
 	UPROPERTY(BlueprintReadOnly, Category = "Multiplayer Subsystem")
 	EMSSessionBackend Backend = EMSSessionBackend::Auto;
 
+	/**
+	 * Address a joiner will connect to ("192.168.1.20:7777"). Filled for search results when the backend can resolve it
+	 * (always for LAN). Informational: Join Lobby resolves it again. Empty for Steam lobbies (they use P2P ids).
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Multiplayer Subsystem")
+	FString ConnectAddress;
+
 	/** True when SessionId is set. Plain C++ helper; Blueprints should test SessionId directly. */
 	bool IsValid() const { return !SessionId.IsEmpty(); }
 };

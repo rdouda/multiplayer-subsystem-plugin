@@ -7,6 +7,7 @@
 #include "Settings/MSSessionSettings.h"
 #include "Game/MSGameMode.h"
 #include "Game/MSGameState.h"
+#include "Net/MSLANNetDriver.h"
 #include "MultiplayerSubsystem.h"
 
 #include "Engine/Engine.h"
@@ -15,6 +16,7 @@
 #include "Engine/World.h"
 #include "Engine/NetConnection.h"
 #include "Engine/NetDriver.h"
+#include "Engine/PendingNetGame.h"
 #include "Engine/EngineBaseTypes.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/GameSession.h"
@@ -142,6 +144,36 @@ namespace
 		}
 	}
 
+	/** "192.168.1.20:7777" -> 7777, or INDEX_NONE when there is no port. */
+	int32 PortOfAddress(const FString& Address)
+	{
+		int32 ColonIndex = INDEX_NONE;
+		if (!Address.FindLastChar(TEXT(':'), ColonIndex) || ColonIndex < 0)
+		{
+			return INDEX_NONE;
+		}
+
+		const FString PortText = Address.Mid(ColonIndex + 1);
+		return PortText.IsNumeric() ? FCString::Atoi(*PortText) : INDEX_NONE;
+	}
+
+	/** Lower-cased ip:port with the default game port made explicit, so "10.0.0.5" and "10.0.0.5:7777" compare equal. */
+	FString NormalizeConnectAddress(const FString& Address)
+	{
+		FString Normalized = Address.TrimStartAndEnd().ToLower();
+		int32 OptionIndex = INDEX_NONE;
+		if (Normalized.FindChar(TEXT('?'), OptionIndex))
+		{
+			Normalized.LeftInline(OptionIndex);
+		}
+
+		if (!Normalized.IsEmpty() && PortOfAddress(Normalized) == INDEX_NONE)
+		{
+			Normalized += TEXT(":7777");
+		}
+		return Normalized;
+	}
+
 	/** One-line description of a raw search result, for the log. */
 	FString DescribeSearchResult(const FOnlineSessionSearchResult& Result)
 	{
@@ -218,6 +250,10 @@ void UMSSessionSubsystem::Deinitialize()
 		World->GetTimerManager().ClearTimer(FindTimeoutTimer);
 	}
 
+	FTSTicker::GetCoreTicker().RemoveTicker(TransportCheckHandle);
+	TransportCheckHandle.Reset();
+
+	SetLANNetDriverOverride(false);
 	UnbindDelegates();
 
 	Super::Deinitialize();
@@ -459,6 +495,168 @@ UWorld* UMSSessionSubsystem::GetGameWorld() const
 }
 
 // ---------------------------------------------------------------------------
+// LAN transport
+// ---------------------------------------------------------------------------
+
+void UMSSessionSubsystem::SetLANNetDriverOverride(bool bEnable)
+{
+	if (!GEngine)
+	{
+		return;
+	}
+
+	FNetDriverDefinition* GameDefinition = GEngine->NetDriverDefinitions.FindByPredicate(
+		[](const FNetDriverDefinition& Definition) { return Definition.DefName == NAME_GameNetDriver; });
+
+	if (!bEnable)
+	{
+		if (!bLANNetDriverOverrideActive)
+		{
+			return;
+		}
+
+		// Restore in place: FNamedNetDriver keeps a pointer to this entry, so the array
+		// must not be resized while a driver is alive.
+		if (GameDefinition)
+		{
+			GameDefinition->DriverClassName = FName(*SavedGameNetDriverClassName);
+			GameDefinition->DriverClassNameFallback = FName(*SavedGameNetDriverFallbackClassName);
+		}
+
+		FTSTicker::GetCoreTicker().RemoveTicker(TransportCheckHandle);
+		TransportCheckHandle.Reset();
+
+		bLANNetDriverOverrideActive = false;
+		MS_LOG(Log, TEXT("LAN transport override cleared. GameNetDriver restored to %s (fallback %s)."),
+			*SavedGameNetDriverClassName, *SavedGameNetDriverFallbackClassName);
+		SavedGameNetDriverClassName.Empty();
+		SavedGameNetDriverFallbackClassName.Empty();
+		return;
+	}
+
+	if (bLANNetDriverOverrideActive)
+	{
+		return;
+	}
+
+	if (!GetDefault<UMSSessionSettings>()->bUsePlainIpDriverForLAN)
+	{
+		MS_LOG(Warning, TEXT("LAN: 'Use Plain Ip Driver For LAN' is off. The LAN lobby will use the configured GameNetDriver (%s). ")
+			TEXT("If that is SteamSocketsNetDriver, host and client can disagree on the protocol and the join will fail."),
+			GameDefinition ? *GameDefinition->DriverClassName.ToString() : TEXT("unknown"));
+		return;
+	}
+
+	if (!GameDefinition)
+	{
+		MS_LOG(Warning, TEXT("LAN: GameNetDriver is missing from NetDriverDefinitions; the session will use the configured driver."));
+		return;
+	}
+
+	SavedGameNetDriverClassName = GameDefinition->DriverClassName.ToString();
+	SavedGameNetDriverFallbackClassName = GameDefinition->DriverClassNameFallback.ToString();
+
+	const FName LANDriverClass(*UMSLANNetDriver::StaticClass()->GetPathName());
+	GameDefinition->DriverClassName = LANDriverClass;
+	GameDefinition->DriverClassNameFallback = LANDriverClass;
+	bLANNetDriverOverrideActive = true;
+
+	MS_LOG(Display, TEXT("LAN transport override: GameNetDriver %s -> %s (fallback %s -> %s)."),
+		*SavedGameNetDriverClassName, *LANDriverClass.ToString(),
+		*SavedGameNetDriverFallbackClassName, *LANDriverClass.ToString());
+
+	ScheduleTransportCheck();
+}
+
+void UMSSessionSubsystem::ScheduleTransportCheck()
+{
+	FTSTicker::GetCoreTicker().RemoveTicker(TransportCheckHandle);
+	TransportCheckAttempts = 0;
+	TransportCheckHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateUObject(this, &UMSSessionSubsystem::RunTransportCheck), 2.0f);
+}
+
+bool UMSSessionSubsystem::RunTransportCheck(float /*DeltaTime*/)
+{
+	if (!bLANNetDriverOverrideActive || !GEngine)
+	{
+		TransportCheckHandle.Reset();
+		return false;
+	}
+
+	// The host's driver appears when the lobby map finishes loading; a joining client's driver is
+	// the pending one until the handshake completes.
+	UNetDriver* Driver = nullptr;
+	const TCHAR* Where = TEXT("world");
+	if (const UWorld* World = GetGameWorld())
+	{
+		Driver = World->GetNetDriver();
+	}
+	if (!Driver)
+	{
+		const UGameInstance* GameInstance = GetGameInstance();
+		if (const FWorldContext* Context = GameInstance ? GameInstance->GetWorldContext() : nullptr)
+		{
+			if (Context->PendingNetGame)
+			{
+				Driver = Context->PendingNetGame->GetNetDriver();
+				Where = TEXT("pending connection");
+			}
+		}
+	}
+
+	if (!Driver)
+	{
+		// Map still loading (host) or the attempt already ended (client). Try a few more times.
+		if (++TransportCheckAttempts < 8)
+		{
+			return true;
+		}
+		MS_LOG(Log, TEXT("LAN transport check: no net driver appeared within the check window (connection already ended?)."));
+		TransportCheckHandle.Reset();
+		return false;
+	}
+
+	TransportCheckHandle.Reset();
+
+	const FString LocalAddress = Driver->LowLevelGetNetworkNumber();
+	if (Driver->GetClass() != UMSLANNetDriver::StaticClass())
+	{
+		MS_LOG(Error, TEXT("LAN transport check FAILED: this is a LAN lobby but the %s driver is %s, not MSLANNetDriver. ")
+			TEXT("Host and client will probably speak different protocols (PacketHandler 'zero's in last byte' / timeout). ")
+			TEXT("Check MS.Diag -> NetDriverDefinition GameNetDriver, and that no other code replaces GameNetDriver."),
+			Where, *Driver->GetClass()->GetName());
+		return false;
+	}
+
+	MS_LOG(Display, TEXT("LAN transport check OK: %s driver is MSLANNetDriver (plain UDP), local address %s."),
+		Where, LocalAddress.IsEmpty() ? TEXT("<not bound yet>") : *LocalAddress);
+
+	// Null advertises the port it read when the session was created, before the listen socket existed.
+	// If the port was taken (two hosts on one PC), UE listens on the next free one and joiners hit the wrong port.
+	if (bLocalHost)
+	{
+		FString Advertised;
+		IOnlineSession* SessionInt = GetSessionInterface();
+		if (SessionInt && SessionInt->GetResolvedConnectString(NAME_GameSession, Advertised))
+		{
+			const int32 AdvertisedPort = PortOfAddress(Advertised);
+			const int32 ListenPort = PortOfAddress(LocalAddress);
+			// Port 0 means "not known when the session was created". The beacon fills in the real port when it
+			// answers a query, so that is not a mismatch (joiners see ip:7777 in their results).
+			if (AdvertisedPort > 0 && ListenPort != INDEX_NONE && AdvertisedPort != ListenPort)
+			{
+				MS_LOG(Error, TEXT("LAN host is listening on port %d but advertising %s. Joiners will connect to the wrong port ")
+					TEXT("(usually another instance on this PC already owns the advertised port). Give each host its own port with -port=<n>, ")
+					TEXT("or close the other process."), ListenPort, *Advertised);
+			}
+		}
+	}
+
+	return false;
+}
+
+// ---------------------------------------------------------------------------
 // Host
 // ---------------------------------------------------------------------------
 
@@ -477,6 +675,13 @@ bool UMSSessionSubsystem::HostLobby(const FMSHostSettings& InSettings)
 			bInSession ? TEXT("you are already in a lobby (MS.Leave first)") : TEXT("a host request is already running"));
 		FailHost(EMSSessionError::AlreadyInSession);
 		return false;
+	}
+
+	// Internet sessions always use the project's configured GameNetDriver. Clear a stale
+	// LAN override left behind by an earlier failed attempt.
+	if (!InSettings.bIsLANMatch)
+	{
+		SetLANNetDriverOverride(false);
 	}
 
 	const EMSSessionBackend Backend = ResolveBackend(InSettings.bIsLANMatch);
@@ -643,7 +848,7 @@ void UMSSessionSubsystem::HandleCreateSessionComplete(FName SessionName, bool bW
 		IOnlineSession* SessionInt = GetSessionInterface();
 		if (SessionInt && SessionInt->GetResolvedConnectString(NAME_GameSession, AdvertisedAddress))
 		{
-			MS_LOG(Display, TEXT("LAN lobby is being advertised. Joiners will be told to connect to: %s"), *AdvertisedAddress);
+			MS_LOG(Display, TEXT("LAN lobby is being advertised (host IP %s; the port is filled in when the listen socket is up)."), *AdvertisedAddress);
 		}
 		else
 		{
@@ -669,6 +874,12 @@ void UMSSessionSubsystem::HandleCreateSessionComplete(FName SessionName, bool bW
 	const FString OptionString = FString::Join(Options, TEXT("?"));
 	MS_LOG(Display, TEXT("Session created. Opening %s?%s"), *LobbyMapPath, *OptionString);
 
+	// UWorld::Listen creates the net driver from GameNetDriver while the map loads.
+	if (CurrentLobbyInfo.bIsLANMatch)
+	{
+		SetLANNetDriverOverride(true);
+	}
+
 	UGameplayStatics::OpenLevel(GetGameInstance(), FName(*LobbyMapPath), true, OptionString);
 
 	OnHostComplete.Broadcast(true, EMSSessionError::None);
@@ -677,6 +888,7 @@ void UMSSessionSubsystem::HandleCreateSessionComplete(FName SessionName, bool bW
 void UMSSessionSubsystem::FailHost(EMSSessionError Error)
 {
 	bHostInProgress = false;
+	SetLANNetDriverOverride(false);
 	SetLastError(Error);
 	MS_LOG(Warning, TEXT("Host Lobby failed: %s - %s"), MSText::GetErrorName(Error), *MSText::GetErrorText(Error).ToString());
 	OnHostComplete.Broadcast(false, Error);
@@ -844,6 +1056,20 @@ void UMSSessionSubsystem::HandleFindSessionsComplete(bool bWasSuccessful)
 	const int32 RawCount = ActiveSearch->SearchResults.Num();
 	MS_LOG(Log, TEXT("Find: online subsystem returned %d raw result(s)."), RawCount);
 
+	// If this process is hosting, its own beacon answers its own query. Never offer a lobby to itself.
+	IOnlineSession* SearchSessionInt = GetSessionInterface();
+	FString OwnSessionId;
+	if (bInSession && bLocalHost && SearchSessionInt)
+	{
+		if (const FNamedOnlineSession* OwnSession = SearchSessionInt->GetNamedSession(NAME_GameSession))
+		{
+			if (OwnSession->SessionInfo.IsValid())
+			{
+				OwnSessionId = OwnSession->SessionInfo->GetSessionId().ToString();
+			}
+		}
+	}
+
 	for (int32 Index = 0; Index < RawCount; ++Index)
 	{
 		const FOnlineSessionSearchResult& Result = ActiveSearch->SearchResults[Index];
@@ -859,7 +1085,11 @@ void UMSSessionSubsystem::HandleFindSessionsComplete(bool bWasSuccessful)
 		{
 			const FOnlineSessionSettings& SearchSettings = Result.Session.SessionSettings;
 
-			if (!SearchSettings.bShouldAdvertise)
+			if (!OwnSessionId.IsEmpty() && Result.GetSessionIdStr() == OwnSessionId)
+			{
+				RejectReason = TEXT("this is your own lobby");
+			}
+			else if (!SearchSettings.bShouldAdvertise)
 			{
 				RejectReason = TEXT("not advertised");
 			}
@@ -898,7 +1128,61 @@ void UMSSessionSubsystem::HandleFindSessionsComplete(bool bWasSuccessful)
 			Info.LobbyName = Info.HostName;
 		}
 
-		MS_LOG(Log, TEXT("  result #%d accepted: %s"), Index, *Description);
+		// The address a joiner would connect to. Shown in the results and used to spot phantom rows.
+		FString ResolvedAddress;
+		if (SearchSessionInt)
+		{
+			SearchSessionInt->GetResolvedConnectString(Result, NAME_GamePort, ResolvedAddress);
+		}
+		Info.ConnectAddress = ResolvedAddress;
+		const FString AddressKey = Info.bIsLANMatch ? NormalizeConnectAddress(ResolvedAddress) : FString();
+
+		// A LAN beacon can answer more than once (several interfaces, retries) and old host processes can keep
+		// answering. Keep a single row per session id AND per connect address: one address can only be one
+		// listening host, so two rows pointing at it are the same lobby (or a stale beacon of a dead one).
+		// The lowest-ping copy wins. MS.Results / MS.Join <index> stay unambiguous.
+		int32 DuplicateIndex = INDEX_NONE;
+		const TCHAR* DuplicateReason = TEXT("");
+		for (int32 ExistingIndex = 0; ExistingIndex < Results.Num(); ++ExistingIndex)
+		{
+			const FMSLobbyInfo& Other = Results[ExistingIndex];
+			if (Other.SessionId == Info.SessionId)
+			{
+				DuplicateIndex = ExistingIndex;
+				DuplicateReason = TEXT("same session id");
+				break;
+			}
+
+			if (!AddressKey.IsEmpty() && Other.bIsLANMatch && NormalizeConnectAddress(Other.ConnectAddress) == AddressKey)
+			{
+				DuplicateIndex = ExistingIndex;
+				DuplicateReason = TEXT("same connect address");
+				break;
+			}
+		}
+
+		if (DuplicateIndex != INDEX_NONE)
+		{
+			FMSLobbyInfo& Existing = Results[DuplicateIndex];
+			const bool bBetterPing = Info.PingInMs >= 0 && (Existing.PingInMs < 0 || Info.PingInMs < Existing.PingInMs);
+			if (bBetterPing)
+			{
+				MS_LOG(Log, TEXT("  result #%d duplicate (%s, id=%s addr=%s): keeping this copy (ping %dms) over row %d (id=%s, ping %dms)."),
+					Index, DuplicateReason, *Info.SessionId, *ResolvedAddress, Info.PingInMs, DuplicateIndex, *Existing.SessionId, Existing.PingInMs);
+
+				CachedSearchResults.Remove(Existing.SessionId);
+				Existing = Info;
+				CachedSearchResults.Add(Info.SessionId, Result);
+			}
+			else
+			{
+				MS_LOG(Log, TEXT("  result #%d duplicate (%s, id=%s addr=%s): skipped (ping %dms; row %d has %dms)."),
+					Index, DuplicateReason, *Info.SessionId, *ResolvedAddress, Info.PingInMs, DuplicateIndex, Existing.PingInMs);
+			}
+			continue;
+		}
+
+		MS_LOG(Log, TEXT("  result #%d accepted: addr=%s %s"), Index, *ResolvedAddress, *Description);
 
 		Results.Add(Info);
 		CachedSearchResults.Add(Info.SessionId, Result);
@@ -938,9 +1222,10 @@ void UMSSessionSubsystem::CompleteFind(bool bSuccess, const TArray<FMSLobbyInfo>
 		for (int32 Index = 0; Index < Results.Num(); ++Index)
 		{
 			const FMSLobbyInfo& Row = Results[Index];
-			MS_LOG(Display, TEXT("  [%d] '%s' host='%s' %d/%d players, ping %dms%s  (MS.Join %d)"),
+			MS_LOG(Display, TEXT("  [%d] '%s' host='%s' %d/%d players, ping %dms%s%s%s  (MS.Join %d)"),
 				Index, *Row.LobbyName, *Row.HostName, Row.CurrentPlayers, Row.MaxPlayers, Row.PingInMs,
-				Row.bIsLANMatch ? TEXT(", LAN") : TEXT(""), Index);
+				Row.bIsLANMatch ? TEXT(", LAN") : TEXT(""),
+				Row.ConnectAddress.IsEmpty() ? TEXT("") : TEXT(", at "), *Row.ConnectAddress, Index);
 		}
 	}
 	else
@@ -1071,6 +1356,13 @@ void UMSSessionSubsystem::BeginJoin(const FOnlineSessionSearchResult& Result, EM
 			CompleteJoin(false, EMSSessionError::FriendJoinDisabled);
 			return;
 		}
+	}
+
+	// Internet sessions use the configured GameNetDriver. LAN applies its override right
+	// before ClientTravel, so the active driver is not changed while we leave a session.
+	if (!Result.Session.SessionSettings.bIsLANMatch)
+	{
+		SetLANNetDriverOverride(false);
 	}
 
 	PendingJoinTarget = MakeShared<FOnlineSessionSearchResult>(Result);
@@ -1227,6 +1519,9 @@ void UMSSessionSubsystem::HandleJoinSessionComplete(FName SessionName, EOnJoinSe
 	MS_LOG(Display, TEXT("Join OK. Connecting to '%s' via %s (ClientTravel %s)"),
 		*CurrentLobbyName, JoinedInfo.bIsLANMatch ? TEXT("LAN") : TEXT("Steam"), *TravelAddress);
 
+	// UPendingNetGame creates the driver from GameNetDriver shortly after ClientTravel.
+	SetLANNetDriverOverride(JoinedInfo.bIsLANMatch);
+
 	PlayerController->ClientTravel(TravelAddress, TRAVEL_Absolute);
 
 	UpdateFriendJoinState();
@@ -1256,6 +1551,8 @@ void UMSSessionSubsystem::CompleteJoin(bool bSuccess, EMSSessionError Error, con
 	SetLastError(Error);
 	if (!bSuccess)
 	{
+		// The LAN driver must not leak into a later internet join.
+		SetLANNetDriverOverride(false);
 		MS_LOG(Warning, TEXT("Join failed: %s - %s"), MSText::GetErrorName(Error), *JoinResult.ErrorMessage.ToString());
 	}
 
@@ -1369,6 +1666,8 @@ void UMSSessionSubsystem::TravelToMainMenu()
 
 void UMSSessionSubsystem::ReturnToMainMenuInternal()
 {
+	SetLANNetDriverOverride(false);
+
 	const UMSSessionSettings* Settings = GetDefault<UMSSessionSettings>();
 	const FString MapPath = Settings->GetMainMenuMapPath();
 	if (MapPath.IsEmpty() || !FPackageName::DoesPackageExist(MapPath))
@@ -1383,6 +1682,8 @@ void UMSSessionSubsystem::ReturnToMainMenuInternal()
 
 void UMSSessionSubsystem::ClearLocalSessionState()
 {
+	SetLANNetDriverOverride(false);
+
 	bInSession = false;
 	bLocalHost = false;
 	bAllowNewPlayers = true;
@@ -1501,10 +1802,13 @@ bool UMSSessionSubsystem::RefreshAdvertisedSession()
 		return false;
 	}
 
-	// LAN sessions have no lobby to update.
+	// LAN sessions have no lobby to update, but the beacon answers every query from the live session, so its
+	// open-slot count must be kept current. The engine registers joining players with the project's DEFAULT online
+	// subsystem (Steam), never with the Null session, so the count would stay at "0/N" forever.
 	if (NamedSession->SessionSettings.bIsLANMatch)
 	{
-		return false;
+		NamedSession->NumOpenPublicConnections = FMath::Clamp(CurrentMaxPlayers - CurrentPlayerCount, 0, CurrentMaxPlayers);
+		return true;
 	}
 
 	FOnlineSessionSettings UpdatedSettings = NamedSession->SessionSettings;
@@ -1705,6 +2009,8 @@ void UMSSessionSubsystem::HandleNetworkFailure(UWorld* World, UNetDriver* Driver
 	if (bLocalHost &&
 		(FailureType == ENetworkFailure::NetDriverListenFailure || FailureType == ENetworkFailure::NetDriverCreateFailure))
 	{
+		// The LAN session could not start; do not leave the override behind.
+		SetLANNetDriverOverride(false);
 		RecordNetworkError(EMSSessionError::TravelFailed, FText::FromString(ErrorString));
 		if (GetDefault<UMSSessionSettings>()->bAutoReturnToMenuOnNetworkError)
 		{
@@ -1888,9 +2194,14 @@ void UMSSessionSubsystem::NotifyTravelFinished(bool bSucceeded)
 	UpdateFriendJoinState();
 }
 
-void UMSSessionSubsystem::NotifyPlayerCountChanged()
+void UMSSessionSubsystem::NotifyPlayerCountChanged(int32 OverrideCount)
 {
-	if (UWorld* World = GetGameWorld())
+	if (OverrideCount != INDEX_NONE)
+	{
+		// Logout runs before the leaving player's PlayerState leaves PlayerArray, so the caller passes the real count.
+		CurrentPlayerCount = FMath::Max(0, OverrideCount);
+	}
+	else if (UWorld* World = GetGameWorld())
 	{
 		if (const AGameStateBase* GameState = World->GetGameState())
 		{
@@ -2182,8 +2493,8 @@ void UMSSessionSubsystem::RunConfigCheck()
 			*GetActiveOnlineSubsystemName())));
 	}
 
-	// 2. GameNetDriver. Internet (Steam) play needs SteamSockets; LAN/Null accepts
-	//    SteamSockets (which forces IP for LAN) or the plain IpNetDriver.
+	// 2. GameNetDriver. Internet (Steam) play needs SteamSockets. LAN installs its own
+	//    plain-IP driver for the session, so the configured driver only matters for internet.
 	bool bGameNetDriverFound = false;
 	bool bGameNetDriverIsSteamSockets = false;
 	FString GameNetDriverClass;
@@ -2345,6 +2656,8 @@ bool UMSSessionSubsystem::JoinByAddress(const FString& InAddress, bool bLAN)
 		return false;
 	}
 
+	SetLANNetDriverOverride(bLAN);
+
 	bInSession = true;
 	bLocalHost = false;
 	bAllowNewPlayers = true;
@@ -2408,6 +2721,9 @@ void UMSSessionSubsystem::GetStatusLines(TArray<FString>& OutLines) const
 			Driver ? *Driver->GetClass()->GetName() : TEXT("none"),
 			Driver ? Driver->ClientConnections.Num() : 0, *Remote));
 	}
+
+	OutLines.Add(FString::Printf(TEXT("Transport: LAN override=%s"),
+		bLANNetDriverOverrideActive ? TEXT("on (MSLANNetDriver)") : TEXT("off")));
 }
 
 void UMSSessionSubsystem::GetDiagnosticLines(TArray<FString>& OutLines) const
@@ -2466,6 +2782,9 @@ void UMSSessionSubsystem::GetDiagnosticLines(TArray<FString>& OutLines) const
 				*Definition.DefName.ToString(), *Definition.DriverClassName.ToString(), *Definition.DriverClassNameFallback.ToString()));
 		}
 	}
+
+	OutLines.Add(FString::Printf(TEXT("LAN transport override: %s"),
+		bLANNetDriverOverrideActive ? TEXT("active (GameNetDriver -> MSLANNetDriver)") : TEXT("inactive")));
 
 	OutLines.Add(FString::Printf(TEXT("Config warnings: %d"), ConfigWarnings.Num()));
 	for (const FText& Warning : ConfigWarnings)

@@ -22,7 +22,8 @@ public class MultiplayerSubsystem : ModuleRules
 		{
 			"CoreOnline",
 			"OnlineBase",
-			"NetCore"
+			"NetCore",
+			"Sockets"
 		});
 	}
 }

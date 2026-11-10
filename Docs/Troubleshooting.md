@@ -19,10 +19,26 @@ results, and a failed attempt left a leftover online session that made every ret
    and then **"Network failure: ..."** / **"Travel failure: ..."**. The host logs **"A client is connecting from ..."** (or the reason for a rejection).
 4. `MS.Connect <hostIP>` bypasses discovery entirely. If that connects but `MS.Join` does not, discovery or the advertised address is the problem
    (compare with `MS.Diag` on the host: "resolved connect string"). If neither connects, the issue is the net driver / firewall / port.
-5. `MS.Diag` prints the configured `NetDriverDefinition`s and the active driver. LAN runs on the **Null** online subsystem
-   (see `README.md` -> Backends), so it does not depend on Steam at all. The plugin tags LAN travel with `?bIsLanMatch=1` on both
-   host and client; `SteamSocketsNetDriver` and `IpNetDriver` both honour it by using plain IP. If the log shows the connection being
-   attempted over a `steam.` address, the `?bIsLanMatch=1` tag was lost.
+5. `MS.Diag` prints the configured `NetDriverDefinition`s, the active driver and **"LAN transport override"**. LAN runs on the
+   **Null** online subsystem (see `README.md` -> Backends), so it does not need Steam. The transport is separate from the OSS:
+   for a LAN session the plugin swaps `GameNetDriver` to `/Script/MultiplayerSubsystem.MSLANNetDriver` on both host and client,
+   which always uses the platform UDP socket subsystem. The configured `SteamSocketsNetDriver` is restored afterwards. If the
+   host and client logs show different drivers (for example one says `SteamSocketsNetDriver`, the other `IpNetDriver` or
+   `MSLANNetDriver`), they are speaking different protocols and you will see PacketHandler parsing errors or a timeout.
+   If the log shows the connection being attempted over a `steam.` address, the `?bIsLanMatch=1` tag was lost.
+
+6. `MS.Find` / `MS.Results` show one row per **session id and per connect address** (`addr=`). Duplicate beacon answers are collapsed
+   (lowest ping wins) and your own lobby is never listed. Two remaining rows with different addresses are different hosts. A row with a
+   high ping (hundreds of ms on a LAN) or `0/N` players is usually a stale beacon from an old or backgrounded host process: close stray
+   game processes (Task Manager), or use `MS.Connect <hostIP>` to bypass discovery. `MS.Log 100` lists every raw result and why it was kept or dropped.
+
+7. **Check the transport.** About two seconds after `MS.Host lan` / `MS.Join`, both logs must contain
+   `LAN transport check OK: ... driver is MSLANNetDriver`. If one side prints `LAN transport check FAILED`, something replaced
+   `GameNetDriver` after the plugin set it; if neither prints anything, **Use Plain Ip Driver For LAN** is off or the session is not LAN.
+   `incompatible_unique_net_id` in a LAN join means the host is not running `AMSGameMode` (a custom GameMode must call the plugin's PreLogin
+   or skip the engine's id-type check itself for LAN).
+   On the host, `LAN host is listening on port X but advertising ...` means another process already owns the advertised port
+   (start each host with a different `-port=`).
 
 ### Two instances on one PC
 LAN uses the Null subsystem, so both instances work with the same (or no) Steam account and get distinct Null ids. Internet lobbies

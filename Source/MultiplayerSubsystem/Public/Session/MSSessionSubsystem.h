@@ -15,6 +15,7 @@ class IOnlineSession;
 class IOnlineIdentity;
 class IOnlinePresence;
 class IOnlineExternalUI;
+class IOnlineSubsystem;
 class UWorld;
 class UNetDriver;
 
@@ -102,6 +103,17 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Multiplayer Subsystem|Session")
 	bool IsSteamActive() const;
+
+	/** Backend selected in Project Settings (or the runtime override). */
+	UFUNCTION(BlueprintPure, Category = "Multiplayer Subsystem|Session")
+	EMSSessionBackend GetConfiguredBackend() const;
+
+	/** Backend actually used by the current session / last operation (Steam or Null). */
+	UFUNCTION(BlueprintPure, Category = "Multiplayer Subsystem|Session")
+	EMSSessionBackend GetActiveBackend() const;
+
+	UFUNCTION(BlueprintPure, Category = "Multiplayer Subsystem|Session")
+	FString GetActiveBackendName() const;
 
 	UFUNCTION(BlueprintPure, Category = "Multiplayer Subsystem|Session")
 	FString GetActiveOnlineSubsystemName() const;
@@ -192,6 +204,10 @@ public:
 	FString GetPublishedPresenceText() const { return LastPresenceText; }
 	EMSFriendJoinState GetLastFriendJoinState() const { return LastFriendJoinState; }
 
+	/** Debug / testing: overrides the configured backend for the next host/find/join. Auto clears it. */
+	void SetBackendOverride(EMSSessionBackend Backend);
+	EMSSessionBackend GetBackendOverride() const { return BackendOverride; }
+
 	/** The single rule behind the advertised joinable flag, PreLogin and Get Friend Join State. */
 	bool ComputeAdvertisedJoinable() const;
 
@@ -217,7 +233,13 @@ public:
 	void GetDiagnosticLines(TArray<FString>& OutLines) const;
 
 private:
-	// --- Online interface access ---
+	// --- Online interface access (uses the active backend) ---
+	IOnlineSubsystem* GetActiveOSS() const;
+	IOnlineSubsystem* GetOSSForBackend(EMSSessionBackend Backend) const;
+	EMSSessionBackend ResolveBackend(bool bIsLANMatch) const;
+	bool SelectBackend(EMSSessionBackend Backend);
+	void EnsureSessionDelegatesBound(IOnlineSession* SessionInt);
+
 	IOnlineSession* GetSessionInterface() const;
 	IOnlineIdentity* GetIdentityInterface() const;
 	IOnlinePresence* GetPresenceInterface() const;
@@ -235,7 +257,7 @@ private:
 	void ClearPresence();
 	void UpdateFriendJoinState();
 
-	FMSLobbyInfo MakeLobbyInfo(const FOnlineSessionSearchResult& Result) const;
+	FMSLobbyInfo MakeLobbyInfo(const FOnlineSessionSearchResult& Result, EMSSessionBackend Backend) const;
 	bool ValidateResultGame(const FOnlineSessionSearchResult& Result, EMSSessionError& OutError) const;
 	void CompleteFind(bool bSuccess, const TArray<FMSLobbyInfo>& Results, EMSSessionError Error);
 	void CompleteJoin(bool bSuccess, EMSSessionError Error, const FString& CustomMessage = FString());
@@ -244,7 +266,7 @@ private:
 	void SetLastError(EMSSessionError Error);
 	void RecordNetworkError(EMSSessionError Error, const FText& Message);
 
-	void BeginJoin(const FOnlineSessionSearchResult& Result, EMSJoinSource Source);
+	void BeginJoin(const FOnlineSessionSearchResult& Result, EMSJoinSource Source, EMSSessionBackend Backend);
 	void ContinueJoinAfterLeave();
 	void ReturnToMainMenuInternal();
 
@@ -329,13 +351,28 @@ private:
 	// On-screen status overlay (MS.Overlay 1), non-Shipping only
 	FTSTicker::FDelegateHandle OverlayTickHandle;
 
-	// Delegate handles
-	FDelegateHandle CreateSessionCompleteHandle;
-	FDelegateHandle DestroySessionCompleteHandle;
-	FDelegateHandle FindSessionsCompleteHandle;
-	FDelegateHandle JoinSessionCompleteHandle;
-	FDelegateHandle UpdateSessionCompleteHandle;
-	FDelegateHandle InviteAcceptedHandle;
+	// Backend state
+	EMSSessionBackend ActiveBackend = EMSSessionBackend::Auto;
+	EMSSessionBackend LastSearchBackend = EMSSessionBackend::Auto;
+	EMSSessionBackend BackendOverride = EMSSessionBackend::Auto;
+	IOnlineSubsystem* ActiveOSS = nullptr;
+	bool bHasActiveBackend = false;
+
+	// Delegate handles. The session delegates are bound lazily per online subsystem
+	// because LAN uses the Null backend while internet sessions use Steam.
+	struct FMSBoundSessionDelegates
+	{
+		IOnlineSession* SessionInterface = nullptr;
+		FDelegateHandle CreateSessionCompleteHandle;
+		FDelegateHandle DestroySessionCompleteHandle;
+		FDelegateHandle FindSessionsCompleteHandle;
+		FDelegateHandle JoinSessionCompleteHandle;
+		FDelegateHandle UpdateSessionCompleteHandle;
+		FDelegateHandle InviteAcceptedHandle;
+	};
+
+	TArray<FMSBoundSessionDelegates> BoundSessionDelegates;
+
 	FDelegateHandle NetworkFailureHandle;
 	FDelegateHandle TravelFailureHandle;
 };

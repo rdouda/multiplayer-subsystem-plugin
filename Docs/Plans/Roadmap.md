@@ -3,10 +3,10 @@
 Ordered roughly by how soon a real project will miss them. Items marked **(verify)** rest on engine behaviour that could not be tested while writing 1.1.
 
 ## P0: needed to trust the plugin
-1. **LAN transport (verify).** LAN currently relies on the Steam net driver switching to plain IP when the URL has `?bIsLanMatch=1`.
-   Needs a real two-machine test and a decision: either keep that, or add a dedicated `LANNetDriver` definition (IpNetDriver) plus a
-   way to select it per connection, or run LAN sessions through `OnlineSubsystemNull` explicitly instead of the default (Steam) OSS.
-   Also: the LAN address comes from the OSS's "local host address", which can pick a virtual adapter (VPN / Hyper-V / WSL). Add a setting to pin the adapter / IP.
+1. **LAN transport.** *Implemented in 1.2:* LAN sessions now run through `OnlineSubsystemNull` instead of the default (Steam) OSS,
+   so they work without Steam and two instances on one machine can host/join. Still needs a real two-machine and two-instance test.
+   Remaining: the LAN address comes from the OSS's "local host address", which can pick a virtual adapter (VPN / Hyper-V / WSL). Add a
+   setting to pin the adapter / IP.
 2. **Automated tests.** UE Automation / Functional tests for the state machine (host, find, join, leave, cancel, stale cleanup) against a fake session interface. The 1.1 fixes are all state-machine bugs that a test would have caught.
 3. **Packaged-build checklist.** Editor-time validation (a small Editor module) for: maps cooked, Steam ini keys, net driver definitions, `steam_appid.txt`, voice flags. Today it is a runtime warning only.
 4. **Reconnect.** Re-joining the same lobby after a dropped connection (remember the last lobby, offer `Rejoin Last Lobby`).
@@ -35,5 +35,5 @@ Ordered roughly by how soon a real project will miss them. Items marked **(verif
 ## Known limitations today
 * Only one session at a time (`GameSession`); no party session alongside the game session.
 * A joiner's lobby info is a snapshot from the search; it does not refresh player counts until the client has connected.
-* `ESMFriendJoinState::NotSteam` (now `EMSFriendJoinState::NotSteam`) is Steam-specific wording; rename when a second backend lands.
+* `EMSFriendJoinState::NotSteam` is Steam-specific wording; rename when a second backend lands (in 1.2 it now also covers the Null backend).
 * The debug console commands are compiled out of Shipping builds by design.

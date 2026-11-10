@@ -200,7 +200,8 @@ void UMSSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		LoginText = FString::Printf(TEXT("%s as '%s'"), LoginStatusName(Identity->GetLoginStatus(0)), *GetLocalDisplayName());
 	}
 
-	MS_LOG(Display, TEXT("MultiplayerSubsystem ready. OSS=%s (Steam=%s, %s) GameId=%s Version=%s. Type MS.Help in the console."),
+	MS_LOG(Display, TEXT("MultiplayerSubsystem ready. Backend=%s (configured=%s, OSS=%s, Steam=%s, %s) GameId=%s Version=%s. Type MS.Help in the console."),
+		MSText::GetBackendName(GetActiveBackend()), MSText::GetBackendName(GetConfiguredBackend()),
 		*GetActiveOnlineSubsystemName(), IsSteamActive() ? TEXT("yes") : TEXT("no"), *LoginText,
 		*ResolvedGameId, *GetDefault<UMSSessionSettings>()->GameVersion);
 }
@@ -224,25 +225,20 @@ void UMSSessionSubsystem::Deinitialize()
 
 void UMSSessionSubsystem::BindDelegates()
 {
-	if (IOnlineSession* SessionInt = GetSessionInterface())
+	if (IOnlineSubsystem* DefaultOSS = IOnlineSubsystem::Get())
 	{
-		CreateSessionCompleteHandle = SessionInt->AddOnCreateSessionCompleteDelegate_Handle(
-			FOnCreateSessionCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleCreateSessionComplete));
+		EnsureSessionDelegatesBound(DefaultOSS->GetSessionInterface().Get());
+	}
 
-		DestroySessionCompleteHandle = SessionInt->AddOnDestroySessionCompleteDelegate_Handle(
-			FOnDestroySessionCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleDestroySessionComplete));
-
-		FindSessionsCompleteHandle = SessionInt->AddOnFindSessionsCompleteDelegate_Handle(
-			FOnFindSessionsCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleFindSessionsComplete));
-
-		JoinSessionCompleteHandle = SessionInt->AddOnJoinSessionCompleteDelegate_Handle(
-			FOnJoinSessionCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleJoinSessionComplete));
-
-		UpdateSessionCompleteHandle = SessionInt->AddOnUpdateSessionCompleteDelegate_Handle(
-			FOnUpdateSessionCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleUpdateSessionComplete));
-
-		InviteAcceptedHandle = SessionInt->AddOnSessionUserInviteAcceptedDelegate_Handle(
-			FOnSessionUserInviteAcceptedDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleSessionUserInviteAccepted));
+	// Bind the explicitly configured backend too, so callbacks arrive even before the
+	// first host/find/join (for example a friends-list invite on Steam).
+	const UMSSessionSettings* Settings = GetDefault<UMSSessionSettings>();
+	if (Settings->Backend != EMSSessionBackend::Auto)
+	{
+		if (IOnlineSubsystem* ConfiguredOSS = GetOSSForBackend(Settings->Backend))
+		{
+			EnsureSessionDelegatesBound(ConfiguredOSS->GetSessionInterface().Get());
+		}
 	}
 
 	if (GEngine)
@@ -252,17 +248,57 @@ void UMSSessionSubsystem::BindDelegates()
 	}
 }
 
+void UMSSessionSubsystem::EnsureSessionDelegatesBound(IOnlineSession* SessionInt)
+{
+	if (!SessionInt)
+	{
+		return;
+	}
+
+	for (const FMSBoundSessionDelegates& Bound : BoundSessionDelegates)
+	{
+		if (Bound.SessionInterface == SessionInt)
+		{
+			return;
+		}
+	}
+
+	FMSBoundSessionDelegates Bound;
+	Bound.SessionInterface = SessionInt;
+	Bound.CreateSessionCompleteHandle = SessionInt->AddOnCreateSessionCompleteDelegate_Handle(
+		FOnCreateSessionCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleCreateSessionComplete));
+	Bound.DestroySessionCompleteHandle = SessionInt->AddOnDestroySessionCompleteDelegate_Handle(
+		FOnDestroySessionCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleDestroySessionComplete));
+	Bound.FindSessionsCompleteHandle = SessionInt->AddOnFindSessionsCompleteDelegate_Handle(
+		FOnFindSessionsCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleFindSessionsComplete));
+	Bound.JoinSessionCompleteHandle = SessionInt->AddOnJoinSessionCompleteDelegate_Handle(
+		FOnJoinSessionCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleJoinSessionComplete));
+	Bound.UpdateSessionCompleteHandle = SessionInt->AddOnUpdateSessionCompleteDelegate_Handle(
+		FOnUpdateSessionCompleteDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleUpdateSessionComplete));
+	Bound.InviteAcceptedHandle = SessionInt->AddOnSessionUserInviteAcceptedDelegate_Handle(
+		FOnSessionUserInviteAcceptedDelegate::CreateUObject(this, &UMSSessionSubsystem::HandleSessionUserInviteAccepted));
+
+	BoundSessionDelegates.Add(Bound);
+}
+
 void UMSSessionSubsystem::UnbindDelegates()
 {
-	if (IOnlineSession* SessionInt = GetSessionInterface())
+	for (FMSBoundSessionDelegates& Bound : BoundSessionDelegates)
 	{
-		SessionInt->ClearOnCreateSessionCompleteDelegate_Handle(CreateSessionCompleteHandle);
-		SessionInt->ClearOnDestroySessionCompleteDelegate_Handle(DestroySessionCompleteHandle);
-		SessionInt->ClearOnFindSessionsCompleteDelegate_Handle(FindSessionsCompleteHandle);
-		SessionInt->ClearOnJoinSessionCompleteDelegate_Handle(JoinSessionCompleteHandle);
-		SessionInt->ClearOnUpdateSessionCompleteDelegate_Handle(UpdateSessionCompleteHandle);
-		SessionInt->ClearOnSessionUserInviteAcceptedDelegate_Handle(InviteAcceptedHandle);
+		if (!Bound.SessionInterface)
+		{
+			continue;
+		}
+
+		Bound.SessionInterface->ClearOnCreateSessionCompleteDelegate_Handle(Bound.CreateSessionCompleteHandle);
+		Bound.SessionInterface->ClearOnDestroySessionCompleteDelegate_Handle(Bound.DestroySessionCompleteHandle);
+		Bound.SessionInterface->ClearOnFindSessionsCompleteDelegate_Handle(Bound.FindSessionsCompleteHandle);
+		Bound.SessionInterface->ClearOnJoinSessionCompleteDelegate_Handle(Bound.JoinSessionCompleteHandle);
+		Bound.SessionInterface->ClearOnUpdateSessionCompleteDelegate_Handle(Bound.UpdateSessionCompleteHandle);
+		Bound.SessionInterface->ClearOnSessionUserInviteAcceptedDelegate_Handle(Bound.InviteAcceptedHandle);
 	}
+
+	BoundSessionDelegates.Reset();
 
 	if (GEngine)
 	{
@@ -275,12 +311,121 @@ void UMSSessionSubsystem::UnbindDelegates()
 }
 
 // ---------------------------------------------------------------------------
-// Online interface access
+// Backend selection
 // ---------------------------------------------------------------------------
 
-static IOnlineSubsystem* GetActiveOSS()
+IOnlineSubsystem* UMSSessionSubsystem::GetOSSForBackend(EMSSessionBackend Backend) const
 {
+	switch (Backend)
+	{
+	case EMSSessionBackend::Steam:
+		return IOnlineSubsystem::Get(TEXT("STEAM"));
+	case EMSSessionBackend::Null:
+		return IOnlineSubsystem::Get(TEXT("NULL"));
+	case EMSSessionBackend::Auto:
+	default:
+		return IOnlineSubsystem::Get();
+	}
+}
+
+IOnlineSubsystem* UMSSessionSubsystem::GetActiveOSS() const
+{
+	if (bHasActiveBackend && ActiveOSS)
+	{
+		return ActiveOSS;
+	}
+
+	// No session yet: report the subsystem for the configured backend so status and
+	// the startup config check describe what will actually be used (Auto -> default).
+	const EMSSessionBackend Configured = GetConfiguredBackend();
+	if (Configured != EMSSessionBackend::Auto)
+	{
+		if (IOnlineSubsystem* ConfiguredOSS = GetOSSForBackend(Configured))
+		{
+			return ConfiguredOSS;
+		}
+	}
+
 	return IOnlineSubsystem::Get();
+}
+
+EMSSessionBackend UMSSessionSubsystem::ResolveBackend(bool bIsLANMatch) const
+{
+	if (bIsLANMatch)
+	{
+		// LAN always runs on the Null subsystem. It works without Steam and lets two
+		// instances on one machine join; Steam cannot join its own lobby.
+		return EMSSessionBackend::Null;
+	}
+
+	if (BackendOverride != EMSSessionBackend::Auto)
+	{
+		return BackendOverride;
+	}
+
+	return GetDefault<UMSSessionSettings>()->Backend;
+}
+
+bool UMSSessionSubsystem::SelectBackend(EMSSessionBackend Backend)
+{
+	IOnlineSubsystem* OSS = GetOSSForBackend(Backend);
+	if (!OSS)
+	{
+		MS_LOG(Error, TEXT("Backend %s is not available (is the matching OnlineSubsystem plugin enabled?)."),
+			MSText::GetBackendName(Backend));
+		return false;
+	}
+
+	ActiveOSS = OSS;
+	bHasActiveBackend = true;
+
+	// Auto resolves to whatever the project's default online subsystem is. Keep the
+	// resolved name so status output and UI can show Steam / Null instead of Auto.
+	const FString OSSName = OSS->GetSubsystemName().ToString();
+	if (OSSName.Equals(TEXT("STEAM"), ESearchCase::IgnoreCase))
+	{
+		ActiveBackend = EMSSessionBackend::Steam;
+	}
+	else if (OSSName.Equals(TEXT("NULL"), ESearchCase::IgnoreCase))
+	{
+		ActiveBackend = EMSSessionBackend::Null;
+	}
+	else
+	{
+		ActiveBackend = Backend;
+	}
+
+	EnsureSessionDelegatesBound(OSS->GetSessionInterface().Get());
+
+	MS_LOG(Log, TEXT("Backend selected: %s (online subsystem %s)."),
+		MSText::GetBackendName(ActiveBackend), *OSSName);
+
+	return true;
+}
+
+void UMSSessionSubsystem::SetBackendOverride(EMSSessionBackend Backend)
+{
+	BackendOverride = Backend;
+
+	MS_LOG(Display, TEXT("Backend override: %s. It applies to the next host/find/join; LAN still always uses Null."),
+		MSText::GetBackendName(Backend));
+}
+
+EMSSessionBackend UMSSessionSubsystem::GetConfiguredBackend() const
+{
+	return BackendOverride != EMSSessionBackend::Auto
+		? BackendOverride
+		: GetDefault<UMSSessionSettings>()->Backend;
+}
+
+EMSSessionBackend UMSSessionSubsystem::GetActiveBackend() const
+{
+	return bHasActiveBackend ? ActiveBackend : GetConfiguredBackend();
+}
+
+FString UMSSessionSubsystem::GetActiveBackendName() const
+{
+	return FString(MSText::GetBackendName(GetActiveBackend()));
 }
 
 IOnlineSession* UMSSessionSubsystem::GetSessionInterface() const
@@ -319,14 +464,6 @@ UWorld* UMSSessionSubsystem::GetGameWorld() const
 
 bool UMSSessionSubsystem::HostLobby(const FMSHostSettings& InSettings)
 {
-	IOnlineSession* SessionInt = GetSessionInterface();
-	if (!SessionInt || !GetIdentityInterface())
-	{
-		MS_LOG(Error, TEXT("Host: no usable online subsystem (active OSS: %s). Run MS.CheckConfig."), *GetActiveOnlineSubsystemName());
-		FailHost(EMSSessionError::NoOnlineSubsystem);
-		return false;
-	}
-
 	if (bDestroyingStale)
 	{
 		MS_LOG(Warning, TEXT("Host: still cleaning up a previous session. Try again in a moment."));
@@ -339,6 +476,23 @@ bool UMSSessionSubsystem::HostLobby(const FMSHostSettings& InSettings)
 		MS_LOG(Warning, TEXT("Host: refused, %s."),
 			bInSession ? TEXT("you are already in a lobby (MS.Leave first)") : TEXT("a host request is already running"));
 		FailHost(EMSSessionError::AlreadyInSession);
+		return false;
+	}
+
+	const EMSSessionBackend Backend = ResolveBackend(InSettings.bIsLANMatch);
+	if (!SelectBackend(Backend))
+	{
+		MS_LOG(Error, TEXT("Host: backend %s is not available."), MSText::GetBackendName(Backend));
+		FailHost(EMSSessionError::NoOnlineSubsystem);
+		return false;
+	}
+
+	IOnlineSession* SessionInt = GetSessionInterface();
+	if (!SessionInt || !GetIdentityInterface())
+	{
+		MS_LOG(Error, TEXT("Host: no usable online subsystem (backend %s, active OSS: %s). Run MS.CheckConfig."),
+			MSText::GetBackendName(ActiveBackend), *GetActiveOnlineSubsystemName());
+		FailHost(EMSSessionError::NoOnlineSubsystem);
 		return false;
 	}
 
@@ -360,8 +514,8 @@ bool UMSSessionSubsystem::HostLobby(const FMSHostSettings& InSettings)
 
 	if (!InSettings.bIsLANMatch && !IsSteamActive())
 	{
-		MS_LOG(Warning, TEXT("Host: this is an internet (non-LAN) lobby but the active online subsystem is '%s', not Steam. Nobody will find it. Is Steam running?"),
-			*GetActiveOnlineSubsystemName());
+		MS_LOG(Warning, TEXT("Host: this is an internet (non-LAN) lobby but the active backend is '%s' (%s), not Steam. Nobody outside this LAN will find it. Set Backend to Steam or Auto in Project Settings."),
+			MSText::GetBackendName(ActiveBackend), *GetActiveOnlineSubsystemName());
 	}
 
 	FOnlineSessionSettings NewSettings;
@@ -380,14 +534,15 @@ bool UMSSessionSubsystem::HostLobby(const FMSHostSettings& InSettings)
 	CurrentLobbyInfo.bIsLANMatch = InSettings.bIsLANMatch;
 	CurrentLobbyInfo.Phase = EMSSessionPhase::Lobby;
 	CurrentLobbyInfo.Visibility = CurrentVisibility;
+	CurrentLobbyInfo.Backend = ActiveBackend;
 
 	bHostInProgress = true;
 	bHostCompletionFired = false;
 	SetLastError(EMSSessionError::None);
 
-	MS_LOG(Display, TEXT("Hosting '%s': %d players max, %s, visibility %s (OSS: %s)"),
+	MS_LOG(Display, TEXT("Hosting '%s': %d players max, %s, visibility %s, backend %s (OSS: %s)"),
 		*CurrentLobbyName, CurrentMaxPlayers, InSettings.bIsLANMatch ? TEXT("LAN") : TEXT("internet"),
-		VisibilityName(CurrentVisibility), *GetActiveOnlineSubsystemName());
+		VisibilityName(CurrentVisibility), MSText::GetBackendName(ActiveBackend), *GetActiveOnlineSubsystemName());
 
 	if (!SessionInt->CreateSession(0, NAME_GameSession, NewSettings))
 	{
@@ -475,6 +630,7 @@ void UMSSessionSubsystem::HandleCreateSessionComplete(FName SessionName, bool bW
 	CurrentLobbyInfo.Phase = CurrentPhase;
 	CurrentLobbyInfo.Visibility = CurrentVisibility;
 	CurrentLobbyInfo.LobbyName = CurrentLobbyName;
+	CurrentLobbyInfo.Backend = ActiveBackend;
 
 	RefreshAdvertisedSession();
 	PublishPresence();
@@ -532,15 +688,6 @@ void UMSSessionSubsystem::FailHost(EMSSessionError Error)
 
 bool UMSSessionSubsystem::FindLobbies(const FMSSearchSettings& InSettings)
 {
-	IOnlineSession* SessionInt = GetSessionInterface();
-	if (!SessionInt)
-	{
-		MS_LOG(Error, TEXT("Find: no online subsystem (active OSS: %s). Run MS.CheckConfig."), *GetActiveOnlineSubsystemName());
-		SetLastError(EMSSessionError::NoOnlineSubsystem);
-		OnFindComplete.Broadcast(false, TArray<FMSLobbyInfo>(), EMSSessionError::NoOnlineSubsystem);
-		return false;
-	}
-
 	if (bSearchInProgress)
 	{
 		// Deliberately not broadcast: that would wrongly finish the search that is already running.
@@ -549,7 +696,27 @@ bool UMSSessionSubsystem::FindLobbies(const FMSSearchSettings& InSettings)
 		return false;
 	}
 
+	const EMSSessionBackend Backend = ResolveBackend(InSettings.bIsLANMatch);
+	if (!SelectBackend(Backend))
+	{
+		MS_LOG(Error, TEXT("Find: backend %s is not available."), MSText::GetBackendName(Backend));
+		SetLastError(EMSSessionError::NoOnlineSubsystem);
+		OnFindComplete.Broadcast(false, TArray<FMSLobbyInfo>(), EMSSessionError::NoOnlineSubsystem);
+		return false;
+	}
+
+	IOnlineSession* SessionInt = GetSessionInterface();
+	if (!SessionInt)
+	{
+		MS_LOG(Error, TEXT("Find: no online subsystem (backend %s, active OSS: %s). Run MS.CheckConfig."),
+			MSText::GetBackendName(ActiveBackend), *GetActiveOnlineSubsystemName());
+		SetLastError(EMSSessionError::NoOnlineSubsystem);
+		OnFindComplete.Broadcast(false, TArray<FMSLobbyInfo>(), EMSSessionError::NoOnlineSubsystem);
+		return false;
+	}
+
 	const UMSSessionSettings* Settings = GetDefault<UMSSessionSettings>();
+	LastSearchBackend = ActiveBackend;
 
 	ActiveSearch = MakeShared<FOnlineSessionSearch>();
 	ActiveSearch->MaxSearchResults = FMath::Max(1, Settings->MaxSearchResults);
@@ -569,9 +736,9 @@ bool UMSSessionSubsystem::FindLobbies(const FMSSearchSettings& InSettings)
 	CachedSearchResults.Reset();
 	SetLastError(EMSSessionError::None);
 
-	MS_LOG(Display, TEXT("Searching for %s lobbies (GameId=%s Version=%s OSS=%s, timeout %.0fs)..."),
-		InSettings.bIsLANMatch ? TEXT("LAN") : TEXT("internet"), *ResolvedGameId, *Settings->GameVersion,
-		*GetActiveOnlineSubsystemName(), Settings->FindTimeoutSeconds);
+	MS_LOG(Display, TEXT("Searching for %s lobbies (backend %s, OSS %s, GameId=%s Version=%s, timeout %.0fs)..."),
+		InSettings.bIsLANMatch ? TEXT("LAN") : TEXT("internet"), MSText::GetBackendName(ActiveBackend),
+		*GetActiveOnlineSubsystemName(), *ResolvedGameId, *Settings->GameVersion, Settings->FindTimeoutSeconds);
 
 	if (!SessionInt->FindSessions(0, ActiveSearch.ToSharedRef()))
 	{
@@ -725,7 +892,7 @@ void UMSSessionSubsystem::HandleFindSessionsComplete(bool bWasSuccessful)
 			continue;
 		}
 
-		FMSLobbyInfo Info = MakeLobbyInfo(Result);
+		FMSLobbyInfo Info = MakeLobbyInfo(Result, LastSearchBackend);
 		if (Info.LobbyName.IsEmpty())
 		{
 			Info.LobbyName = Info.HostName;
@@ -802,17 +969,27 @@ void UMSSessionSubsystem::GetLastSearchResults(TArray<FMSLobbyInfo>& OutResults)
 
 bool UMSSessionSubsystem::JoinLobby(const FMSLobbyInfo& LobbyInfo)
 {
-	if (!IsOnlineAvailable())
-	{
-		MS_LOG(Error, TEXT("Join: no online subsystem (active OSS: %s)."), *GetActiveOnlineSubsystemName());
-		CompleteJoin(false, EMSSessionError::NoOnlineSubsystem);
-		return false;
-	}
-
 	if (bJoinInProgress || bDestroyingStale)
 	{
 		MS_LOG(Warning, TEXT("Join: another join or cleanup is still in progress."));
 		SetLastError(EMSSessionError::Busy);
+		return false;
+	}
+
+	const EMSSessionBackend Backend = LastSearchBackend != EMSSessionBackend::Auto
+		? LastSearchBackend
+		: ResolveBackend(LobbyInfo.bIsLANMatch);
+	if (!SelectBackend(Backend))
+	{
+		MS_LOG(Error, TEXT("Join: backend %s is not available."), MSText::GetBackendName(Backend));
+		CompleteJoin(false, EMSSessionError::NoOnlineSubsystem);
+		return false;
+	}
+
+	if (!IsOnlineAvailable())
+	{
+		MS_LOG(Error, TEXT("Join: no online subsystem (backend %s, active OSS: %s)."), MSText::GetBackendName(ActiveBackend), *GetActiveOnlineSubsystemName());
+		CompleteJoin(false, EMSSessionError::NoOnlineSubsystem);
 		return false;
 	}
 
@@ -832,7 +1009,7 @@ bool UMSSessionSubsystem::JoinLobby(const FMSLobbyInfo& LobbyInfo)
 	}
 
 	const FOnlineSessionSearchResult Result = *Found;
-	BeginJoin(Result, EMSJoinSource::Browser);
+	BeginJoin(Result, EMSJoinSource::Browser, Backend);
 	return true;
 }
 
@@ -861,14 +1038,20 @@ bool UMSSessionSubsystem::JoinSearchResultByIndex(int32 Index)
 		return false;
 	}
 
-	BeginJoin(Result, EMSJoinSource::Browser);
+	BeginJoin(Result, EMSJoinSource::Browser, LastSearchBackend);
 	return true;
 }
 
-void UMSSessionSubsystem::BeginJoin(const FOnlineSessionSearchResult& Result, EMSJoinSource Source)
+void UMSSessionSubsystem::BeginJoin(const FOnlineSessionSearchResult& Result, EMSJoinSource Source, EMSSessionBackend Backend)
 {
 	if (bJoinInProgress)
 	{
+		return;
+	}
+
+	if (!SelectBackend(Backend))
+	{
+		CompleteJoin(false, EMSSessionError::NoOnlineSubsystem);
 		return;
 	}
 
@@ -1005,7 +1188,7 @@ void UMSSessionSubsystem::HandleJoinSessionComplete(FName SessionName, EOnJoinSe
 	FMSLobbyInfo JoinedInfo;
 	if (PendingJoinTarget.IsValid())
 	{
-		JoinedInfo = MakeLobbyInfo(*PendingJoinTarget);
+		JoinedInfo = MakeLobbyInfo(*PendingJoinTarget, ActiveBackend);
 	}
 
 	FString TravelAddress = Address;
@@ -1067,7 +1250,7 @@ void UMSSessionSubsystem::CompleteJoin(bool bSuccess, EMSSessionError Error, con
 	JoinResult.Source = PendingJoinSource;
 	if (PendingJoinTarget.IsValid())
 	{
-		JoinResult.LobbyInfo = MakeLobbyInfo(*PendingJoinTarget);
+		JoinResult.LobbyInfo = MakeLobbyInfo(*PendingJoinTarget, ActiveBackend);
 	}
 
 	SetLastError(Error);
@@ -1250,7 +1433,8 @@ EMSFriendJoinState UMSSessionSubsystem::GetFriendJoinState() const
 		return EMSFriendJoinState::NotInLobby;
 	}
 
-	if (CurrentLobbyInfo.bIsLANMatch)
+	// Friends-list join needs Steam presence. LAN and the Null backend have neither.
+	if (!IsSteamActive())
 	{
 		return EMSFriendJoinState::NotSteam;
 	}
@@ -1432,9 +1616,11 @@ bool UMSSessionSubsystem::SetLobbyVisibility(EMSLobbyVisibility NewVisibility)
 		return false;
 	}
 
-	// A LAN lobby has no Steam lobby to re-advertise.
-	if (CurrentLobbyInfo.bIsLANMatch)
+	// Visibility is a Steam lobby concept. LAN and Null lobbies have no lobby to re-advertise.
+	if (!IsSteamActive())
 	{
+		MS_LOG(Warning, TEXT("Set visibility: only available on the Steam backend (active backend is %s)."),
+			MSText::GetBackendName(ActiveBackend));
 		SetLastError(EMSSessionError::NoOnlineSubsystem);
 		return false;
 	}
@@ -1621,13 +1807,15 @@ void UMSSessionSubsystem::HandleSessionUserInviteAccepted(const bool bWasSuccess
 	const EMSJoinSource Source = bPendingCommandLineInvite ? EMSJoinSource::CommandLine : EMSJoinSource::FriendsList;
 	bPendingCommandLineInvite = false;
 
-	MS_LOG(Display, TEXT("Invite / friends-list join accepted: %s (source=%d)"),
-		*DescribeSearchResult(InviteResult), static_cast<int32>(Source));
+	const EMSSessionBackend Backend = ResolveBackend(InviteResult.Session.SessionSettings.bIsLANMatch);
 
-	const FMSLobbyInfo Info = MakeLobbyInfo(InviteResult);
+	MS_LOG(Display, TEXT("Invite / friends-list join accepted: %s (source=%d, backend=%s)"),
+		*DescribeSearchResult(InviteResult), static_cast<int32>(Source), MSText::GetBackendName(Backend));
+
+	const FMSLobbyInfo Info = MakeLobbyInfo(InviteResult, Backend);
 	OnInviteAccepted.Broadcast(Info, Source);
 
-	BeginJoin(InviteResult, Source);
+	BeginJoin(InviteResult, Source, Backend);
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,12 +1957,13 @@ bool UMSSessionSubsystem::IsJoinAllowedNow(FText& OutReason) const
 // Small helpers
 // ---------------------------------------------------------------------------
 
-FMSLobbyInfo UMSSessionSubsystem::MakeLobbyInfo(const FOnlineSessionSearchResult& Result) const
+FMSLobbyInfo UMSSessionSubsystem::MakeLobbyInfo(const FOnlineSessionSearchResult& Result, EMSSessionBackend Backend) const
 {
 	FMSLobbyInfo Info;
 	Info.SessionId = Result.GetSessionIdStr();
 	Info.HostName = Result.Session.OwningUserName;
 	Info.PingInMs = Result.PingInMs;
+	Info.Backend = Backend;
 
 	const FOnlineSessionSettings& SessionSettings = Result.Session.SessionSettings;
 	Info.MaxPlayers = SessionSettings.NumPublicConnections;
@@ -1940,16 +2129,26 @@ void UMSSessionSubsystem::RunConfigCheck()
 {
 	ConfigWarnings.Reset();
 
-	// 1. Default online subsystem.
+	const UMSSessionSettings* Settings = GetDefault<UMSSessionSettings>();
+	const EMSSessionBackend Configured = GetConfiguredBackend();
+	// Auto and Steam both expect Steam for internet play. Null does not, and LAN always
+	// uses Null, so the Steam-specific checks only matter for those two settings.
+	const bool bUsesSteamForInternet = Configured != EMSSessionBackend::Null;
+
+	// 1. Default online subsystem. Auto resolves to it, so it should be Steam.
 	FString DefaultPlatformService;
 	GConfig->GetString(TEXT("OnlineSubsystem"), TEXT("DefaultPlatformService"), DefaultPlatformService, GEngineIni);
-	if (!DefaultPlatformService.Equals(TEXT("Steam"), ESearchCase::IgnoreCase))
+	const bool bDefaultIsSteam = DefaultPlatformService.Equals(TEXT("Steam"), ESearchCase::IgnoreCase);
+
+	if (bUsesSteamForInternet && !bDefaultIsSteam)
 	{
-		ConfigWarnings.Add(FText::FromString(
-			TEXT("OnlineSubsystem.DefaultPlatformService is not Steam. Add [OnlineSubsystem] DefaultPlatformService=Steam to Config/DefaultEngine.ini.")));
+		ConfigWarnings.Add(FText::FromString(FString::Printf(
+			TEXT("Backend is %s but OnlineSubsystem.DefaultPlatformService is '%s', not Steam. Internet play needs Steam: add [OnlineSubsystem] DefaultPlatformService=Steam to Config/DefaultEngine.ini, or set Backend to Null for LAN-only / offline testing."),
+			MSText::GetBackendName(Configured),
+			DefaultPlatformService.IsEmpty() ? TEXT("<empty>") : *DefaultPlatformService)));
 	}
 
-	if (DefaultPlatformService.Equals(TEXT("Steam"), ESearchCase::IgnoreCase))
+	if (bUsesSteamForInternet && bDefaultIsSteam)
 	{
 		bool bSteamEnabled = true;
 		if (GConfig->GetBool(TEXT("OnlineSubsystemSteam"), TEXT("bEnabled"), bSteamEnabled, GEngineIni) && !bSteamEnabled)
@@ -1968,30 +2167,50 @@ void UMSSessionSubsystem::RunConfigCheck()
 		}
 	}
 
-	if (!IsOnlineAvailable())
+	// The Null subsystem is required for LAN (and for Backend=Null). Loading it here also
+	// makes sure the module is present before the first LAN host/find.
+	if (!IOnlineSubsystem::Get(TEXT("NULL")))
 	{
 		ConfigWarnings.Add(FText::FromString(
-			TEXT("The online session or identity interface is missing. Make sure Steam is running and the Steam online subsystem is enabled.")));
+			TEXT("The Null online subsystem is not available. Enable the OnlineSubsystemNull plugin in the .uproject; LAN and Backend=Null need it.")));
 	}
 
-	// 2. GameNetDriver.
+	if (!IsOnlineAvailable())
+	{
+		ConfigWarnings.Add(FText::FromString(FString::Printf(
+			TEXT("The active online subsystem (%s) has no session or identity interface. For internet play, start Steam and enable the Steam online subsystem."),
+			*GetActiveOnlineSubsystemName())));
+	}
+
+	// 2. GameNetDriver. Internet (Steam) play needs SteamSockets; LAN/Null accepts
+	//    SteamSockets (which forces IP for LAN) or the plain IpNetDriver.
+	bool bGameNetDriverFound = false;
 	bool bGameNetDriverIsSteamSockets = false;
+	FString GameNetDriverClass;
 	if (GEngine)
 	{
 		for (const FNetDriverDefinition& Definition : GEngine->NetDriverDefinitions)
 		{
 			if (Definition.DefName == TEXT("GameNetDriver"))
 			{
-				bGameNetDriverIsSteamSockets = Definition.DriverClassName.ToString().Contains(TEXT("SteamSockets"));
+				bGameNetDriverFound = true;
+				GameNetDriverClass = Definition.DriverClassName.ToString();
+				bGameNetDriverIsSteamSockets = GameNetDriverClass.Contains(TEXT("SteamSockets"));
 				break;
 			}
 		}
 	}
 
-	if (!bGameNetDriverIsSteamSockets)
+	if (!bGameNetDriverFound)
 	{
 		ConfigWarnings.Add(FText::FromString(
-			TEXT("GameNetDriver is not SteamSockets. Add the NetDriverDefinitions block for /Script/SteamSockets.SteamSocketsNetDriver to Config/DefaultEngine.ini (see the plugin documentation).")));
+			TEXT("There is no GameNetDriver in NetDriverDefinitions. Add a GameNetDriver block to Config/DefaultEngine.ini (see the plugin documentation).")));
+	}
+	else if (bUsesSteamForInternet && !bGameNetDriverIsSteamSockets)
+	{
+		ConfigWarnings.Add(FText::FromString(FString::Printf(
+			TEXT("GameNetDriver is '%s', not SteamSockets. Internet play needs /Script/SteamSockets.SteamSocketsNetDriver (see the plugin documentation)."),
+			*GameNetDriverClass)));
 	}
 
 	// 3. Voice switches.
@@ -2012,7 +2231,6 @@ void UMSSessionSubsystem::RunConfigCheck()
 	}
 
 	// 4. Maps.
-	const UMSSessionSettings* Settings = GetDefault<UMSSessionSettings>();
 	if (Settings->GetLobbyMapPath().IsEmpty())
 	{
 		ConfigWarnings.Add(FText::FromString(
@@ -2026,11 +2244,12 @@ void UMSSessionSubsystem::RunConfigCheck()
 
 	if (ConfigWarnings.Num() == 0)
 	{
-		MS_LOG(Log, TEXT("Configuration check: Configuration OK."));
+		MS_LOG(Log, TEXT("Configuration check: Configuration OK (backend %s)."), MSText::GetBackendName(Configured));
 	}
 	else
 	{
-		MS_LOG(Warning, TEXT("Configuration check: %d problem(s) found. Run MS.CheckConfig for the list."), ConfigWarnings.Num());
+		MS_LOG(Warning, TEXT("Configuration check: %d problem(s) found (backend %s). Run MS.CheckConfig for the list."),
+			ConfigWarnings.Num(), MSText::GetBackendName(Configured));
 		for (const FText& Warning : ConfigWarnings)
 		{
 			MS_LOG(Log, TEXT("  - %s"), *Warning.ToString());
@@ -2133,6 +2352,7 @@ bool UMSSessionSubsystem::JoinByAddress(const FString& InAddress, bool bLAN)
 	CurrentLobbyInfo = FMSLobbyInfo();
 	CurrentLobbyInfo.LobbyName = Address;
 	CurrentLobbyInfo.bIsLANMatch = bLAN;
+	CurrentLobbyInfo.Backend = bLAN ? EMSSessionBackend::Null : GetActiveBackend();
 	CurrentLobbyName = Address;
 
 	MS_LOG(Display, TEXT("Direct connect (no session discovery): ClientTravel %s"), *Address);
@@ -2153,7 +2373,8 @@ void UMSSessionSubsystem::GetStatusLines(TArray<FString>& OutLines) const
 
 	const UMSSessionSettings* Settings = GetDefault<UMSSessionSettings>();
 
-	OutLines.Add(FString::Printf(TEXT("Backend: OSS=%s  Steam=%s  GameId=%s  Version=%s"),
+	OutLines.Add(FString::Printf(TEXT("Backend: active=%s configured=%s OSS=%s Steam=%s GameId=%s Version=%s"),
+		MSText::GetBackendName(GetActiveBackend()), MSText::GetBackendName(GetConfiguredBackend()),
 		*GetActiveOnlineSubsystemName(), IsSteamActive() ? TEXT("yes") : TEXT("no"), *ResolvedGameId, *Settings->GameVersion));
 
 	OutLines.Add(FString::Printf(TEXT("Lobby: in=%s host=%s LAN=%s phase=%s players=%d/%d visibility=%s name='%s'"),

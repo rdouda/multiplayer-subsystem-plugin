@@ -44,6 +44,25 @@ enum class EMSSessionPhase : uint8
 	InGame
 };
 
+/**
+ * Which online backend the session subsystem uses.
+ *
+ * Auto is the normal choice: internet sessions use the project's default online
+ * subsystem (normally Steam) and LAN sessions always use the engine's Null
+ * subsystem. LAN therefore works without Steam and with a single Steam account,
+ * which is what makes two instances on one machine able to host and join.
+ */
+UENUM(BlueprintType)
+enum class EMSSessionBackend : uint8
+{
+	/** Steam for internet sessions when available; Null for LAN. */
+	Auto,
+	/** Force Steam for internet sessions. LAN still uses Null. */
+	Steam,
+	/** Force the engine's Null subsystem. Useful for local testing without Steam. */
+	Null
+};
+
 /** Steam lobby visibility. */
 UENUM(BlueprintType)
 enum class EMSLobbyVisibility : uint8
@@ -77,6 +96,7 @@ enum class EMSFriendJoinState : uint8
 	LobbyFull,
 	InviteOnly,
 	DisabledBySettings,
+	/** The active backend has no friends list / presence (LAN or Null). */
 	NotSteam
 };
 
@@ -167,6 +187,10 @@ struct FMSLobbyInfo
 	UPROPERTY(BlueprintReadOnly, Category = "Multiplayer Subsystem")
 	EMSLobbyVisibility Visibility = EMSLobbyVisibility::Public;
 
+	/** Backend that produced this lobby (Steam or Null; Auto only before a session exists). */
+	UPROPERTY(BlueprintReadOnly, Category = "Multiplayer Subsystem")
+	EMSSessionBackend Backend = EMSSessionBackend::Auto;
+
 	/** True when SessionId is set. Plain C++ helper; Blueprints should test SessionId directly. */
 	bool IsValid() const { return !SessionId.IsEmpty(); }
 };
@@ -247,6 +271,7 @@ namespace MSText
 	MULTIPLAYERSUBSYSTEM_API FText GetFriendJoinStateText(EMSFriendJoinState State);
 	MULTIPLAYERSUBSYSTEM_API const TCHAR* GetErrorName(EMSSessionError Error);
 	MULTIPLAYERSUBSYSTEM_API const TCHAR* GetFriendJoinStateName(EMSFriendJoinState State);
+	MULTIPLAYERSUBSYSTEM_API const TCHAR* GetBackendName(EMSSessionBackend Backend);
 }
 
 /** Small string helpers shared by the session code. */

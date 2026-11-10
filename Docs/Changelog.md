@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2
+**Auto backend selection.** New `EMSSessionBackend` (`Auto` / `Steam` / `Null`) and a **Backend** setting in
+*Multiplayer Subsystem: Session*. LAN sessions always use the engine's **Null** online subsystem, so LAN works without Steam and
+two instances on one machine can host/join each other. Internet sessions use the configured backend or, for `Auto`, the project's
+default online subsystem (normally Steam).
+
+* New Blueprint API: `Get Configured Backend`, `Get Active Backend`, `Get Active Backend Name`. `FMSLobbyInfo` gained a `Backend` field.
+* New `MS.Backend [auto|steam|null]` console command (shows configured/active/override or sets a runtime override).
+* Session delegates are now bound per online subsystem, because LAN (Null) and internet (Steam) can both be used in one process.
+* `MS.CheckConfig` is backend-aware: Steam checks only apply when internet play uses Steam; the Null subsystem is verified for LAN;
+  `SteamSockets` or `IpNetDriver` are accepted for LAN/Null.
+* Friends-list join, presence, visibility and the invite overlay report `NotSteam` / fail cleanly on LAN/Null lobbies.
+
 ## 1.1
 **Rename:** `SteamMultiplayer`/`SM` -> `MultiplayerSubsystem`/`MS` (see `Migration.md`).
 

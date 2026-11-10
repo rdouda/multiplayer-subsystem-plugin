@@ -1,7 +1,11 @@
-# Plan: more than one multiplayer backend (not started)
+# Plan: more than one multiplayer backend (auto selection + LAN Null done in 1.2; full interface not started)
 
 Goal: keep the public API (`UMSSessionSubsystem`, the Blueprint nodes, `FMSLobbyInfo`, delegates) and make the backend swappable:
 Steam (today), EOS, Null/LAN, later platform OSSes or a custom service.
+
+**1.2 progress:** `EMSSessionBackend` (`Auto` / `Steam` / `Null`) and the **Backend** setting exist. `Auto`/`Steam` use the
+default OSS / Steam for internet sessions, LAN always selects Null, and session delegates are bound per online subsystem. This is a
+pragmatic first step; the `IMSBackend` interface and capabilities below are still open.
 
 ## What is already backend-neutral
 Module/class names, `FMSHostSettings`, `FMSSearchSettings`, `FMSLobbyInfo`, `FMSJoinResult`, `EMSSessionError`, the game classes, voice and the ready check.
@@ -29,6 +33,6 @@ The subsystem talks to the engine only through `IOnlineSession`, `IOnlineIdentit
 
 ## Order of work
 1. Extract the interface and move the existing Steam code behind it unchanged (no behaviour change, tests prove it).
-2. Add the Null/LAN backend and route `bIsLANMatch` to it.
-3. Add capabilities and update the UI-facing queries (`GetFriendJoinState`, presence).
+2. ~~Add the Null/LAN backend and route `bIsLANMatch` to it.~~ **Done in 1.2** (LAN resolves to Null; still goes through the shared `IOnlineSession` code rather than a dedicated interface).
+3. Add capabilities and update the UI-facing queries (`GetFriendJoinState`, presence). *Partially done:* `GetFriendJoinState` now returns `NotSteam` for any non-Steam active backend.
 4. Add the EOS backend.

@@ -19,22 +19,25 @@ results, and a failed attempt left a leftover online session that made every ret
    and then **"Network failure: ..."** / **"Travel failure: ..."**. The host logs **"A client is connecting from ..."** (or the reason for a rejection).
 4. `MS.Connect <hostIP>` bypasses discovery entirely. If that connects but `MS.Join` does not, discovery or the advertised address is the problem
    (compare with `MS.Diag` on the host: "resolved connect string"). If neither connects, the issue is the net driver / firewall / port.
-5. `MS.Diag` prints the configured `NetDriverDefinition`s and the active driver. The project is expected to use `SteamSocketsNetDriver`
-   with an `IpNetDriver` fallback. The plugin tags LAN travel with `?bIsLanMatch=1` on both host and client, which is what the Steam net
-   drivers key off to use plain IP. **This part is unverified here** (see `Plans/Roadmap.md`, "LAN transport"): if the log shows the
-   connection being attempted over a `steam.` address or the driver failing to listen, that is the cause.
+5. `MS.Diag` prints the configured `NetDriverDefinition`s and the active driver. LAN runs on the **Null** online subsystem
+   (see `README.md` -> Backends), so it does not depend on Steam at all. The plugin tags LAN travel with `?bIsLanMatch=1` on both
+   host and client; `SteamSocketsNetDriver` and `IpNetDriver` both honour it by using plain IP. If the log shows the connection being
+   attempted over a `steam.` address, the `?bIsLanMatch=1` tag was lost.
 
 ### Two instances on one PC
-Both instances run as the same Steam user. Steam lobbies cannot be joined by the account that owns them, and invites to yourself do nothing, so
-test internet lobbies with two accounts/machines. LAN should work on one PC but both processes then share one Steam id, which can confuse
-anything that keys on it (voice, mute list, player state ids). If a LAN join connects and then drops, suspect this first.
+LAN uses the Null subsystem, so both instances work with the same (or no) Steam account and get distinct Null ids. Internet lobbies
+still cannot be joined by the Steam account that owns them, so test those with two accounts/machines. If a LAN join connects and then
+drops, check the host log for **"A client is connecting from ..."** and the client log for **"Network failure"**.
 
 ## Nothing works / `NoOnlineSubsystem`
-* Steam client not running, or a packaged build started outside Steam without an app id. `MS.CheckConfig` reports a missing
-  `SteamDevAppId` / `steam_appid.txt`.
-* `MS.Status` shows `OSS=` the active online subsystem. If it is not `STEAM`, internet lobbies cannot work.
+* Internet play: Steam client not running, or a packaged build started outside Steam without an app id. `MS.CheckConfig` reports a
+  missing `SteamDevAppId` / `steam_appid.txt`.
+* `MS.Status` shows the active backend and `OSS=`. For internet lobbies it must be `Steam` / `STEAM`. For LAN it should be `Null` /
+  `NULL`; LAN does not need Steam. Use `MS.Backend` to see configured vs active.
 
 ## Internet lobbies are not found
+* Check the Backend setting / `MS.Backend`: internet play needs `Auto` (with Steam as the default online subsystem) or `Steam`.
+  `Null` only works on the local machine/network.
 * 1.0 never set the Steam "search lobbies" flag, so Steam searched the dedicated-server list and never saw listen-server lobbies. Fixed in 1.1.
 * Same Steam region/download region, same GameId + GameVersion, lobby visibility Public.
 

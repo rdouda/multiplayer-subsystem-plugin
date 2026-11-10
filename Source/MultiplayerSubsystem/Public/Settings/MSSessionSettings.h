@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
+#include "Core/MSTypes.h"
 #include "MSSessionSettings.generated.h"
 
 class UWorld;
@@ -19,6 +20,15 @@ class MULTIPLAYERSUBSYSTEM_API UMSSessionSettings : public UDeveloperSettings
 
 public:
 	UMSSessionSettings();
+
+	/**
+	 * Which online backend to use.
+	 * Auto (recommended): internet sessions use the project's default online subsystem (normally Steam),
+	 * LAN sessions always use the engine's Null subsystem.
+	 * LAN always uses Null even when Steam is selected, so it works without Steam and with one Steam account.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Backend")
+	EMSSessionBackend Backend = EMSSessionBackend::Auto;
 
 	/** Map opened after leaving a lobby or after a disconnect. Required for Leave Lobby(true). */
 	UPROPERTY(EditAnywhere, Config, Category = "Maps", meta = (AllowedClasses = "/Script/Engine.World"))

@@ -198,6 +198,7 @@ namespace MSDebug
 			TEXT("  MS.Status                one-screen state summary"),
 			TEXT("  MS.Diag                  deep dump: login, online session, connect string, net drivers, config warnings"),
 			TEXT("  MS.CheckConfig           configuration problems (alias: MS.Config)"),
+			TEXT("  MS.Backend [auto|steam|null]   show or override the backend (LAN always uses Null)"),
 			TEXT("  MS.Log [n]               last n log lines (default 40), including async events"),
 			TEXT("  MS.Log.Clear             clear that history"),
 			TEXT("  MS.Log.OnScreen <0|1|2>  on-screen messages: off / important / everything"),
@@ -699,6 +700,52 @@ namespace MSDebug
 		}
 	}
 
+	void HandleBackend(const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		UMSSessionSubsystem* Session = GetSession(World);
+		if (!RequireSession(Session, TEXT("MS.Backend"), Ar))
+		{
+			return;
+		}
+
+		if (Args.Num() == 0)
+		{
+			Out(Ar, ELogVerbosity::Display, FString::Printf(
+				TEXT("MS.Backend: configured=%s active=%s override=%s OSS=%s."),
+				MSText::GetBackendName(Session->GetConfiguredBackend()),
+				MSText::GetBackendName(Session->GetActiveBackend()),
+				MSText::GetBackendName(Session->GetBackendOverride()),
+				*Session->GetActiveOnlineSubsystemName()));
+			return;
+		}
+
+		const FString Requested = Args[0].ToLower();
+		EMSSessionBackend NewBackend = EMSSessionBackend::Auto;
+		if (Requested == TEXT("auto") || Requested == TEXT("reset"))
+		{
+			NewBackend = EMSSessionBackend::Auto;
+		}
+		else if (Requested == TEXT("steam"))
+		{
+			NewBackend = EMSSessionBackend::Steam;
+		}
+		else if (Requested == TEXT("null"))
+		{
+			NewBackend = EMSSessionBackend::Null;
+		}
+		else
+		{
+			Out(Ar, ELogVerbosity::Warning, TEXT("MS.Backend: expected auto, steam or null."));
+			return;
+		}
+
+		Session->SetBackendOverride(NewBackend);
+		Out(Ar, ELogVerbosity::Display, FString::Printf(
+			TEXT("MS.Backend: override=%s (configured=%s, active=%s). Applies to the next host/find/join; LAN always uses Null."),
+			MSText::GetBackendName(NewBackend), MSText::GetBackendName(Session->GetConfiguredBackend()),
+			MSText::GetBackendName(Session->GetActiveBackend())));
+	}
+
 	void HandleLog(const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
 	{
 		const int32 Count = Args.Num() > 0 ? FMath::Max(1, FCString::Atoi(*Args[0])) : 40;
@@ -888,6 +935,7 @@ MS_REGISTER_COMMAND(GCommandMSStatus,      TEXT("MS.Status"),      TEXT("MS.Stat
 MS_REGISTER_COMMAND(GCommandMSDiag,        TEXT("MS.Diag"),        TEXT("MS.Diag - deep diagnostics: login, online session, connect string, net drivers, config."), HandleDiag)
 MS_REGISTER_COMMAND(GCommandMSCheckConfig, TEXT("MS.CheckConfig"), TEXT("MS.CheckConfig - print configuration warnings."), HandleCheckConfig)
 MS_REGISTER_COMMAND(GCommandMSConfig,      TEXT("MS.Config"),      TEXT("MS.Config - alias of MS.CheckConfig."), HandleCheckConfig)
+MS_REGISTER_COMMAND(GCommandMSBackend,     TEXT("MS.Backend"),     TEXT("MS.Backend [auto|steam|null] - show or override the backend for the next host/find/join (LAN always uses Null)."), HandleBackend)
 MS_REGISTER_COMMAND(GCommandMSLog,         TEXT("MS.Log"),         TEXT("MS.Log [n] - print the last n plugin log lines (default 40)."), HandleLog)
 MS_REGISTER_COMMAND(GCommandMSLogClear,    TEXT("MS.Log.Clear"),   TEXT("MS.Log.Clear - clear the plugin log history."), HandleLogClear)
 MS_REGISTER_COMMAND(GCommandMSVoiceStatus, TEXT("MS.Voice.Status"), TEXT("MS.Voice.Status - print voice state and why it is unavailable."), HandleVoiceStatus)

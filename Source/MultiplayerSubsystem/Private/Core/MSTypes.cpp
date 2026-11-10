@@ -60,12 +60,23 @@ namespace MSText
 		}
 	}
 
+	const TCHAR* GetBackendName(EMSSessionBackend Backend)
+	{
+		switch (Backend)
+		{
+		case EMSSessionBackend::Auto:  return TEXT("Auto");
+		case EMSSessionBackend::Steam: return TEXT("Steam");
+		case EMSSessionBackend::Null:  return TEXT("Null");
+		default:                       return TEXT("Unknown");
+		}
+	}
+
 	FText GetErrorText(EMSSessionError Error)
 	{
 		switch (Error)
 		{
 		case EMSSessionError::None:              return FText::GetEmpty();
-		case EMSSessionError::NoOnlineSubsystem: return LOCTEXT("ErrNoOSS", "Steam is not available. Start Steam and relaunch the game.");
+		case EMSSessionError::NoOnlineSubsystem: return LOCTEXT("ErrNoOSS", "No usable online backend. Start Steam for internet play, or use LAN (Null backend).");
 		case EMSSessionError::MapNotConfigured:  return LOCTEXT("ErrMapNotConfigured", "A required map is not configured in Project Settings -> Plugins -> Multiplayer Subsystem: Session.");
 		case EMSSessionError::AlreadyInSession:  return LOCTEXT("ErrAlreadyInSession", "You are already in a lobby. Leave it first.");
 		case EMSSessionError::NotInSession:      return LOCTEXT("ErrNotInSession", "You are not in a lobby.");

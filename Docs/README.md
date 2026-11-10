@@ -1,4 +1,4 @@
-# Multiplayer Subsystem (prefix `MS`)
+# Multiplayer Subsystem
 
 Listen-server sessions for quick multiplayer prototypes. **Steam** is the internet backend and the engine's **Null** subsystem
 is used for **LAN** (and can be forced for local testing). The module and class names are backend-neutral so more backends

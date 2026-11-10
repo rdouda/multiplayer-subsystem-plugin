@@ -1,0 +1,24 @@
+# Unreal Engine generated / local
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+.vs/
+*.sln
+*.slnx
+*.VC.db
+*.opensdf
+*.sdf
+*.suo
+*.xcodeproj
+*.xcworkspace
+*.pdb
+*.obj
+*.lib
+*.dll
+*.exe
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/

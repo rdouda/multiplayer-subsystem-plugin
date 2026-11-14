@@ -1,4 +1,4 @@
-# MultiplayerSubsystem — Plugin
+# MultiplayerSubsystem — Plugin Design
 
 | | |
 |---|---|
